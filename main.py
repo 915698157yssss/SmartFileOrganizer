@@ -1,18 +1,11 @@
 """
-Smart Organizer v4 - 增强优化版
-修复：
-1. 修复循环处理自身日志文件的问题
-2. 优化未分类文件夹管理
-3. 增强文件处理稳定性
-4. 改进交互体验
-5. 修复线程安全问题
-6. 优化内存管理
-新增：
-1. 文件去重检测
-2. 批量操作进度显示
-3. 分类规则自定义
-4. 文件预览功能
-5. 操作撤销功能
+Smart Organizer v5 - 独立数据库版
+核心改进：
+1. 学习数据库完全独立于程序文件
+2. 支持数据库导入/导出
+3. 数据库备份和恢复功能
+4. 程序更新时无缝迁移数据
+5. 多数据库管理支持
 """
 
 import os
@@ -32,48 +25,365 @@ import faiss
 from datetime import datetime
 from collections import defaultdict
 import re
+import pickle
 
 # ==================== 配置区域 ====================
 DEFAULT_WATCH_FOLDER = r"F:\SmartFileOrganizer\待分类文件"
 DEFAULT_BASE_TARGET = r"G:\（2026.6.5备份）眉山苏伊士污水处理有限公司"
-MIN_CONFIDENCE_THRESHOLD = 0.5  # 最小置信度阈值
-MAX_LEARNING_ITEMS = 10000  # 最大学习数据量
-SUPPORTED_EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', 
-                        '.txt', '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.avi', 
-                        '.zip', '.rar', '.7z', '.exe', '.msi', '.iso'}
+MIN_CONFIDENCE_THRESHOLD = 0.5
+MAX_LEARNING_ITEMS = 10000
+DUPLICATE_CHECK_EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', 
+                              '.txt', '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.avi', 
+                              '.zip', '.rar', '.7z', '.exe', '.msi', '.iso'}
 
-# ==================== 文件去重工具 ====================
-class FileDeduplicator:
-    """文件去重工具"""
+# ==================== 独立数据库管理器 ====================
+class DatabaseManager:
+    """
+    独立数据库管理器
+    负责所有数据的存储、读取、备份和迁移
+    """
     
-    def __init__(self, db_path=None):
-        self.db_path = db_path or os.path.join(os.path.dirname(__file__), "file_hash.db")
+    # 数据库版本，用于兼容性检查
+    DB_VERSION = "5.0"
+    
+    def __init__(self, base_path=None):
+        """
+        初始化数据库管理器
+        base_path: 数据库存储路径，默认为用户文档目录
+        """
+        if base_path is None:
+            # 默认存储在用户文档目录下的 SmartOrganizerData 文件夹
+            self.base_path = os.path.join(os.path.expanduser("~"), "Documents", "SmartOrganizerData")
+        else:
+            self.base_path = base_path
+        
+        # 创建数据库目录
+        os.makedirs(self.base_path, exist_ok=True)
+        
+        # 数据库文件路径
+        self.db_file = os.path.join(self.base_path, "learning_data.db")
+        self.db_backup_file = os.path.join(self.base_path, "learning_data_backup.db")
+        self.db_export_file = os.path.join(self.base_path, "learning_data_export.json")
+        self.hash_db_file = os.path.join(self.base_path, "file_hash.json")
+        self.duplicate_log_file = os.path.join(self.base_path, "duplicate_log.json")
+        self.config_file = os.path.join(self.base_path, "config.json")
+        
+        # 内存缓存
+        self.memory = []
         self.hash_cache = {}
-        self._load_cache()
+        self.duplicate_log = []
+        self.config = {}
+        
+        # 加载所有数据
+        self.load_all()
     
-    def _load_cache(self):
-        """加载哈希缓存"""
-        if os.path.exists(self.db_path):
+    def load_all(self):
+        """加载所有数据"""
+        self.load_config()
+        self.load_learning_data()
+        self.load_hash_cache()
+        self.load_duplicate_log()
+    
+    def load_config(self):
+        """加载配置"""
+        if os.path.exists(self.config_file):
             try:
-                with open(self.db_path, 'r', encoding='utf-8') as f:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    self.config = json.load(f)
+            except:
+                self.config = {}
+        else:
+            self.config = {
+                'db_version': self.DB_VERSION,
+                'created_at': datetime.now().isoformat(),
+                'last_updated': datetime.now().isoformat(),
+                'total_learnings': 0,
+                'total_duplicates': 0
+            }
+            self.save_config()
+    
+    def save_config(self):
+        """保存配置"""
+        self.config['last_updated'] = datetime.now().isoformat()
+        self.config['total_learnings'] = len(self.memory)
+        self.config['total_duplicates'] = len(self.duplicate_log)
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+    
+    def load_learning_data(self):
+        """加载学习数据"""
+        if os.path.exists(self.db_file):
+            try:
+                with open(self.db_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 检查版本兼容性
+                    if data.get('version') == self.DB_VERSION:
+                        self.memory = data.get('memory', [])
+                    else:
+                        # 尝试迁移旧版本数据
+                        self.memory = self._migrate_old_data(data)
+                        print(f"数据已从版本 {data.get('version', 'unknown')} 迁移到 {self.DB_VERSION}")
+            except Exception as e:
+                print(f"加载学习数据失败: {e}")
+                self.memory = []
+        else:
+            self.memory = []
+        
+        # 更新配置
+        self.config['total_learnings'] = len(self.memory)
+        self.save_config()
+    
+    def _migrate_old_data(self, old_data):
+        """迁移旧版本数据"""
+        # 如果是旧版本格式，尝试转换
+        if 'memory' in old_data:
+            memory = old_data['memory']
+            # 确保每条记录都有必要的字段
+            for item in memory:
+                if 'learned_at' not in item:
+                    item['learned_at'] = datetime.now().isoformat()
+                if 'text' not in item or 'path' not in item:
+                    # 跳过无效记录
+                    continue
+            return memory
+        else:
+            # 尝试从其他格式恢复
+            return []
+    
+    def save_learning_data(self):
+        """保存学习数据"""
+        try:
+            data = {
+                'version': self.DB_VERSION,
+                'memory': self.memory,
+                'updated_at': datetime.now().isoformat(),
+                'total_entries': len(self.memory)
+            }
+            
+            # 先备份当前数据
+            if os.path.exists(self.db_file):
+                try:
+                    shutil.copy2(self.db_file, self.db_backup_file)
+                except:
+                    pass
+            
+            # 保存新数据
+            with open(self.db_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            self.config['total_learnings'] = len(self.memory)
+            self.save_config()
+            
+        except Exception as e:
+            print(f"保存学习数据失败: {e}")
+    
+    def export_learning_data(self, export_path=None):
+        """
+        导出学习数据为JSON格式
+        可用于迁移到新程序
+        """
+        if export_path is None:
+            export_path = self.db_export_file
+        
+        try:
+            export_data = {
+                'version': self.DB_VERSION,
+                'exported_at': datetime.now().isoformat(),
+                'memory': self.memory,
+                'config': self.config,
+                'total_entries': len(self.memory)
+            }
+            
+            with open(export_path, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, ensure_ascii=False, indent=2)
+            
+            return export_path
+        except Exception as e:
+            print(f"导出数据失败: {e}")
+            return None
+    
+    def import_learning_data(self, import_path):
+        """
+        导入学习数据
+        支持从JSON文件或旧数据库文件导入
+        """
+        try:
+            with open(import_path, 'r', encoding='utf-8') as f:
+                import_data = json.load(f)
+            
+            # 检查数据格式
+            if 'memory' in import_data:
+                new_memory = import_data['memory']
+            else:
+                # 尝试直接作为memory数组
+                new_memory = import_data if isinstance(import_data, list) else []
+            
+            if not new_memory:
+                return False, "未找到有效数据"
+            
+            # 验证数据格式
+            valid_memory = []
+            for item in new_memory:
+                if 'text' in item and 'path' in item:
+                    valid_memory.append(item)
+            
+            if not valid_memory:
+                return False, "数据格式无效"
+            
+            # 合并或替换数据
+            if messagebox.askyesno("导入确认", 
+                f"将导入 {len(valid_memory)} 条学习数据\n"
+                f"当前有 {len(self.memory)} 条数据\n"
+                "是否合并（是）还是替换（否）？"):
+                # 合并：去重后合并
+                existing_set = {(item['text'], item['path']) for item in self.memory}
+                for item in valid_memory:
+                    key = (item['text'], item['path'])
+                    if key not in existing_set:
+                        self.memory.append(item)
+                        existing_set.add(key)
+                self.memory = self.memory[:MAX_LEARNING_ITEMS]
+            else:
+                # 替换
+                self.memory = valid_memory[:MAX_LEARNING_ITEMS]
+            
+            # 保存
+            self.save_learning_data()
+            return True, f"成功导入 {len(valid_memory)} 条数据"
+            
+        except Exception as e:
+            return False, f"导入失败: {str(e)}"
+    
+    def load_hash_cache(self):
+        """加载哈希缓存"""
+        if os.path.exists(self.hash_db_file):
+            try:
+                with open(self.hash_db_file, 'r', encoding='utf-8') as f:
                     self.hash_cache = json.load(f)
             except:
                 self.hash_cache = {}
+        else:
+            self.hash_cache = {}
     
-    def _save_cache(self):
+    def save_hash_cache(self):
         """保存哈希缓存"""
         try:
-            with open(self.db_path, 'w', encoding='utf-8') as f:
+            with open(self.hash_db_file, 'w', encoding='utf-8') as f:
                 json.dump(self.hash_cache, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        except Exception as e:
+            print(f"保存哈希缓存失败: {e}")
+    
+    def load_duplicate_log(self):
+        """加载重复文件日志"""
+        if os.path.exists(self.duplicate_log_file):
+            try:
+                with open(self.duplicate_log_file, 'r', encoding='utf-8') as f:
+                    self.duplicate_log = json.load(f)
+            except:
+                self.duplicate_log = []
+        else:
+            self.duplicate_log = []
+    
+    def save_duplicate_log(self):
+        """保存重复文件日志"""
+        try:
+            # 只保留最近1000条
+            recent_log = self.duplicate_log[-1000:]
+            with open(self.duplicate_log_file, 'w', encoding='utf-8') as f:
+                json.dump(recent_log, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存重复日志失败: {e}")
+    
+    def create_backup(self):
+        """创建完整数据备份"""
+        backup_folder = os.path.join(self.base_path, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        os.makedirs(backup_folder, exist_ok=True)
+        
+        try:
+            # 备份所有数据文件
+            for file_path in [self.db_file, self.hash_db_file, self.duplicate_log_file, self.config_file]:
+                if os.path.exists(file_path):
+                    shutil.copy2(file_path, os.path.join(backup_folder, os.path.basename(file_path)))
+            
+            # 备份向量索引（如果有）
+            # 这里可以添加FAISS索引的备份
+            
+            return backup_folder
+        except Exception as e:
+            print(f"备份失败: {e}")
+            return None
+    
+    def restore_backup(self, backup_path):
+        """从备份恢复数据"""
+        if not os.path.exists(backup_path):
+            return False, "备份路径不存在"
+        
+        try:
+            # 恢复所有数据文件
+            for file_name in os.listdir(backup_path):
+                src_path = os.path.join(backup_path, file_name)
+                dst_path = os.path.join(self.base_path, file_name)
+                shutil.copy2(src_path, dst_path)
+            
+            # 重新加载数据
+            self.load_all()
+            return True, "数据恢复成功"
+        except Exception as e:
+            return False, f"恢复失败: {str(e)}"
+    
+    def get_stats(self):
+        """获取数据库统计信息"""
+        return {
+            'database_path': self.base_path,
+            'db_version': self.DB_VERSION,
+            'total_learnings': len(self.memory),
+            'total_duplicates': len(self.duplicate_log),
+            'hash_cache_size': len(self.hash_cache),
+            'created_at': self.config.get('created_at', 'unknown'),
+            'last_updated': self.config.get('last_updated', 'unknown')
+        }
+    
+    def clear_all_data(self):
+        """清空所有数据"""
+        if messagebox.askyesno("⚠️ 确认清空", 
+            "此操作将清空所有学习数据、哈希缓存和重复文件日志！\n确定要继续吗？"):
+            self.memory = []
+            self.hash_cache = {}
+            self.duplicate_log = []
+            self.save_learning_data()
+            self.save_hash_cache()
+            self.save_duplicate_log()
+            return True
+        return False
+
+# ==================== 文件去重工具 ====================
+class FileDeduplicator:
+    """文件去重工具 - 使用独立数据库"""
+    
+    def __init__(self, watch_folder, db_manager):
+        self.watch_folder = watch_folder
+        self.db_manager = db_manager
+        
+        parent_folder = os.path.dirname(watch_folder)
+        self.duplicate_folder = os.path.join(parent_folder, "重复文件")
+        os.makedirs(self.duplicate_folder, exist_ok=True)
     
     def get_file_hash(self, filepath, chunk_size=8192):
         """计算文件哈希值"""
-        if filepath in self.hash_cache:
-            return self.hash_cache[filepath]
+        # 先检查缓存
+        if filepath in self.db_manager.hash_cache:
+            return self.db_manager.hash_cache[filepath]
         
         try:
+            if not os.path.exists(filepath):
+                return None
+            
+            if os.path.getsize(filepath) == 0:
+                return None
+            
             hasher = hashlib.sha256()
             with open(filepath, 'rb') as f:
                 while True:
@@ -82,66 +392,138 @@ class FileDeduplicator:
                         break
                     hasher.update(chunk)
             hash_value = hasher.hexdigest()
-            self.hash_cache[filepath] = hash_value
-            self._save_cache()
+            
+            # 更新缓存
+            self.db_manager.hash_cache[filepath] = hash_value
+            self.db_manager.save_hash_cache()
             return hash_value
         except Exception as e:
+            print(f"计算哈希失败 {filepath}: {e}")
             return None
     
-    def is_duplicate(self, filepath):
-        """检查是否为重复文件"""
-        hash_value = self.get_file_hash(filepath)
-        if not hash_value:
-            return False
+    def check_and_handle_duplicate(self, filepath, log_callback=None):
+        """检查并处理重复文件"""
+        filename = os.path.basename(filepath)
         
-        # 检查是否已存在相同哈希的文件
-        for path, h in self.hash_cache.items():
-            if path != filepath and h == hash_value:
-                if os.path.exists(path):
-                    return True
-        return False
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in DUPLICATE_CHECK_EXTENSIONS:
+            return (False, None, None)
+        
+        try:
+            if os.path.getsize(filepath) == 0:
+                return (False, None, None)
+        except:
+            return (False, None, None)
+        
+        file_hash = self.get_file_hash(filepath)
+        if not file_hash:
+            return (False, None, None)
+        
+        duplicate_info = self._find_duplicate(file_hash, filepath)
+        
+        if duplicate_info:
+            target_path = self._move_to_duplicate_folder(filepath, filename, duplicate_info)
+            if target_path:
+                log_msg = f"🔄 检测到重复文件: {filename} (与 {duplicate_info['original']} 重复)"
+                if log_callback:
+                    log_callback(log_msg)
+                
+                # 记录到数据库
+                self.db_manager.duplicate_log.append({
+                    'filename': filename,
+                    'original': duplicate_info['original'],
+                    'moved_to': target_path,
+                    'file_hash': file_hash,
+                    'timestamp': datetime.now().isoformat()
+                })
+                self.db_manager.save_duplicate_log()
+                return (True, target_path, duplicate_info)
+        
+        return (False, None, None)
     
-    def find_duplicates(self, directory):
-        """查找目录中的重复文件"""
-        duplicates = defaultdict(list)
-        for root, dirs, files in os.walk(directory):
-            for file in files:
-                filepath = os.path.join(root, file)
-                hash_value = self.get_file_hash(filepath)
-                if hash_value:
-                    duplicates[hash_value].append(filepath)
+    def _find_duplicate(self, file_hash, current_path):
+        """查找重复文件"""
+        for path, hash_value in self.db_manager.hash_cache.items():
+            if path != current_path and hash_value == file_hash:
+                if os.path.exists(path):
+                    try:
+                        rel_path = os.path.relpath(path, self.watch_folder)
+                    except:
+                        rel_path = path
+                    return {
+                        'original': rel_path,
+                        'original_path': path,
+                        'hash': file_hash
+                    }
+        return None
+    
+    def _move_to_duplicate_folder(self, filepath, filename, duplicate_info):
+        """移动重复文件"""
+        os.makedirs(self.duplicate_folder, exist_ok=True)
         
-        return {h: paths for h, paths in duplicates.items() if len(paths) > 1}
+        target_path = os.path.join(self.duplicate_folder, filename)
+        if os.path.exists(target_path):
+            name, ext = os.path.splitext(filename)
+            counter = 1
+            while True:
+                new_name = f"{name}_重复{counter}{ext}"
+                new_path = os.path.join(self.duplicate_folder, new_name)
+                if not os.path.exists(new_path):
+                    target_path = new_path
+                    break
+                counter += 1
+        
+        try:
+            shutil.move(filepath, target_path)
+            return target_path
+        except Exception as e:
+            print(f"移动重复文件失败: {e}")
+            return None
+    
+    def get_duplicate_stats(self):
+        """获取重复文件统计"""
+        total_size = 0
+        if os.path.exists(self.duplicate_folder):
+            for root, dirs, files in os.walk(self.duplicate_folder):
+                for f in files:
+                    try:
+                        total_size += os.path.getsize(os.path.join(root, f))
+                    except:
+                        pass
+        
+        return {
+            'duplicate_folder': self.duplicate_folder,
+            'duplicate_count': len(self.db_manager.duplicate_log),
+            'folder_size': total_size
+        }
 
 # ==================== 核心逻辑类 ====================
 class SmartOrganizerEngine:
-    """文件分类引擎 - 增强版"""
+    """文件分类引擎 - 使用独立数据库"""
     
-    def __init__(self, watch_folder, base_target, log_callback=None):
+    def __init__(self, watch_folder, base_target, db_manager, log_callback=None):
         self.watch_folder = watch_folder
         self.base_target = base_target
+        self.db_manager = db_manager
         
-        # 未分类文件夹放在监听目录的**同级目录**
+        # 文件夹路径
         parent_folder = os.path.dirname(watch_folder)
         self.unknown_folder = os.path.join(parent_folder, "未分类文件")
-        
-        # 程序数据文件夹
         self.data_folder = os.path.join(parent_folder, "smart_organizer")
         self.log_file = os.path.join(self.data_folder, "file_log.txt")
-        self.db_file = os.path.join(self.data_folder, "vector_db.json")
-        self.hash_db_file = os.path.join(self.data_folder, "file_hash.json")
         
         self.log_callback = log_callback
         self.model = None
         self.index = None
-        self.memory = []
         self.dimension = 384
         self.is_running = False
         self.observer = None
         self.pending_files = queue.Queue()
         self.processed_files = set()
         self.processed_lock = threading.Lock()
-        self.deduplicator = FileDeduplicator(self.hash_db_file)
+        
+        # 初始化去重工具
+        self.deduplicator = FileDeduplicator(watch_folder, db_manager)
         
         # 统计信息
         self.stats = {
@@ -150,14 +532,15 @@ class SmartOrganizerEngine:
             'manual_classified': 0,
             'unknown_moved': 0,
             'duplicates_found': 0,
+            'duplicates_moved': 0,
             'errors': 0
         }
         
         # 初始化模型
         self._init_model()
-        self.load_db()
+        self._load_memory_to_index()
         
-        # 创建必要的目录
+        # 创建目录
         os.makedirs(self.unknown_folder, exist_ok=True)
         os.makedirs(self.data_folder, exist_ok=True)
     
@@ -173,6 +556,32 @@ class SmartOrganizerEngine:
         except Exception as e:
             self.log(f"❌ 模型加载失败: {e}")
             self.model = None
+    
+    def _load_memory_to_index(self):
+        """将数据库中的学习数据加载到索引"""
+        memory = self.db_manager.memory
+        if not memory or self.model is None:
+            return
+        
+        self.log(f"📦 加载 {len(memory)} 条学习数据到索引...")
+        vectors = []
+        valid_memory = []
+        
+        for item in memory:
+            vec = self.encode(item["text"])
+            if vec is not None:
+                vectors.append(vec)
+                valid_memory.append(item)
+        
+        if vectors:
+            self.index.reset()
+            self.index.add(np.array(vectors).astype("float32"))
+            self.log(f"✔ 索引加载完成: {len(vectors)} 条数据")
+        
+        # 更新数据库中的有效数据
+        if len(valid_memory) != len(memory):
+            self.db_manager.memory = valid_memory
+            self.db_manager.save_learning_data()
     
     def log(self, msg):
         """输出日志"""
@@ -193,57 +602,9 @@ class SmartOrganizerEngine:
             self.log(f"❌ 向量化失败: {e}")
             return None
     
-    def load_db(self):
-        """加载学习数据库"""
-        self.log("📦 正在加载学习数据库...")
-        if not os.path.exists(self.db_file):
-            self.log("✔ 无历史数据，跳过")
-            return
-        
-        try:
-            with open(self.db_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                self.memory = data.get("memory", [])
-                self.stats = data.get("stats", self.stats)
-            
-            if len(self.memory) == 0:
-                self.log("✔ 数据库为空")
-                return
-            
-            vectors = []
-            valid_memory = []
-            for item in self.memory:
-                vec = self.encode(item["text"])
-                if vec is not None:
-                    vectors.append(vec)
-                    valid_memory.append(item)
-            
-            self.memory = valid_memory
-            if len(vectors) > 0:
-                self.index.reset()
-                self.index.add(np.array(vectors).astype("float32"))
-            
-            self.log(f"✔ 加载完成: {len(self.memory)} 条学习数据")
-        except Exception as e:
-            self.log(f"⚠ 学习数据库加载失败: {e}")
-            self.memory = []
-    
-    def save_db(self):
-        """保存学习数据库"""
-        data = {
-            "memory": self.memory,
-            "stats": self.stats,
-            "last_updated": datetime.now().isoformat()
-        }
-        try:
-            with open(self.db_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            self.log(f"⚠ 保存数据库失败: {e}")
-    
     def predict_with_suggestions(self, text, top_k=3):
-        """预测并返回 Top-K 建议"""
-        if len(self.memory) == 0 or self.model is None:
+        """预测分类建议"""
+        if len(self.db_manager.memory) == 0 or self.model is None:
             return []
         
         vec = self.encode(text)
@@ -251,25 +612,25 @@ class SmartOrganizerEngine:
             return []
         
         vec = vec.reshape(1, -1)
-        k = min(top_k, len(self.memory))
+        k = min(top_k, len(self.db_manager.memory))
         D, I = self.index.search(vec, k)
         
         suggestions = []
         seen_paths = set()
         for i in range(k):
             if I[0][i] != -1:
-                path = self.memory[I[0][i]]["path"]
+                path = self.db_manager.memory[I[0][i]]["path"]
                 if path in seen_paths:
                     continue
                 seen_paths.add(path)
-                similarity = max(0, 1 - D[0][i] / 2)  # 归一化相似度
+                similarity = max(0, 1 - D[0][i] / 2)
                 if similarity >= MIN_CONFIDENCE_THRESHOLD:
                     suggestions.append((path, similarity))
         
         return suggestions[:top_k]
     
     def learn(self, text, path):
-        """学习新的映射关系"""
+        """学习新的分类映射"""
         if not text or not path:
             return
         
@@ -278,55 +639,50 @@ class SmartOrganizerEngine:
             return
         
         # 检查是否已存在
-        for item in self.memory:
+        for item in self.db_manager.memory:
             if item["text"] == text and item["path"] == path:
                 self.log(f"ℹ️ 映射已存在: {text} -> {path}")
                 return
         
-        # 限制学习数据量
-        if len(self.memory) >= MAX_LEARNING_ITEMS:
-            # 删除最旧的条目
-            self.memory.pop(0)
+        # 限制数据量
+        if len(self.db_manager.memory) >= MAX_LEARNING_ITEMS:
+            self.db_manager.memory.pop(0)
             self.index.reset()
-            if self.memory:
-                vectors = [self.encode(item["text"]) for item in self.memory if self.encode(item["text"]) is not None]
+            if self.db_manager.memory:
+                vectors = [self.encode(item["text"]) for item in self.db_manager.memory 
+                          if self.encode(item["text"]) is not None]
                 if vectors:
                     self.index.add(np.array(vectors).astype("float32"))
         
+        # 添加新数据
         self.index.add(vec.reshape(1, -1))
-        self.memory.append({"text": text, "path": path, "learned_at": datetime.now().isoformat()})
-        self.save_db()
+        self.db_manager.memory.append({
+            "text": text, 
+            "path": path, 
+            "learned_at": datetime.now().isoformat()
+        })
+        self.db_manager.save_learning_data()
         self.log(f"📝 已学习: {text} -> {path}")
     
     def _should_skip_file(self, filename, filepath):
-        """判断是否应该跳过该文件"""
-        # 跳过临时文件
+        """判断是否应该跳过文件"""
         temp_patterns = ["~$", ".tmp", ".temp", ".cache", ".lock", "._"]
         for pattern in temp_patterns:
             if pattern in filename:
                 return True
         
-        # 跳过系统文件
-        if filename.startswith("."):
+        if filename.startswith(".") or filename.startswith("已处理_") or filename.startswith("processed_"):
             return True
         
-        # 跳过已处理的文件标记
-        if filename.startswith("已处理_") or filename.startswith("processed_"):
+        if filepath == self.log_file:
             return True
         
-        # 跳过程序自身的文件
-        if filepath == self.log_file or filepath == self.db_file or filepath == self.hash_db_file:
+        if self.data_folder in filepath or self.unknown_folder in filepath:
             return True
         
-        # 跳过数据目录中的文件
-        if self.data_folder in filepath:
+        if self.deduplicator.duplicate_folder in filepath:
             return True
         
-        # 跳过未分类目录中的文件（避免二次处理）
-        if self.unknown_folder in filepath:
-            return True
-        
-        # 检查是否已经处理过
         try:
             stat = os.stat(filepath)
             file_key = f"{filename}_{stat.st_size}_{stat.st_mtime}"
@@ -346,90 +702,70 @@ class SmartOrganizerEngine:
             file_key = f"{filename}_{stat.st_size}_{stat.st_mtime}"
             with self.processed_lock:
                 self.processed_files.add(file_key)
-                # 限制缓存大小
                 if len(self.processed_files) > 5000:
-                    # 转换为列表，删除最旧的1000条
                     files_list = list(self.processed_files)
                     self.processed_files = set(files_list[-4000:])
         except:
             pass
     
     def process_file(self, path, force=False):
-        """
-        处理单个文件
-        返回：'auto' | 'unknown' | 'duplicate' | 'skipped' | 'error'
-        """
+        """处理单个文件"""
         filename = os.path.basename(path)
         
-        # 检查是否应该跳过
         if not force and self._should_skip_file(filename, path):
             return 'skipped'
         
-        # 标记为正在处理
         self._mark_processed(path)
-        
         self.log(f"📄 处理文件: {filename}")
         self.stats['total_processed'] += 1
         
-        # 检查文件是否存在
         if not os.path.exists(path):
             self.log(f"⚠ 文件不存在: {path}")
             return 'error'
         
-        # 检查文件大小（跳过空文件或过大文件）
         try:
             file_size = os.path.getsize(path)
             if file_size == 0:
                 self.log(f"⚠ 空文件，跳过: {filename}")
                 return 'skipped'
-            if file_size > 2 * 1024 * 1024 * 1024:  # 2GB
-                self.log(f"⚠ 文件过大 ({file_size/1024/1024/1024:.1f}GB)，跳过: {filename}")
+            if file_size > 2 * 1024 * 1024 * 1024:
+                self.log(f"⚠ 文件过大，跳过: {filename}")
                 return 'skipped'
         except:
             pass
         
-        # 检查是否为重复文件
-        if self.deduplicator.is_duplicate(path):
-            self.log(f"⚠ 检测到重复文件: {filename}")
-            self.stats['duplicates_found'] += 1
-            # 可选择删除重复文件或移动到重复文件夹
-            duplicate_folder = os.path.join(self.data_folder, "重复文件")
-            os.makedirs(duplicate_folder, exist_ok=True)
-            try:
-                shutil.move(path, os.path.join(duplicate_folder, filename))
-                self.log(f"📦 重复文件已移至: {duplicate_folder}")
-                return 'duplicate'
-            except Exception as e:
-                self.log(f"❌ 移动重复文件失败: {e}")
-                return 'error'
+        # 重复文件检测
+        is_duplicate, target_path, dup_info = self.deduplicator.check_and_handle_duplicate(
+            path, log_callback=self.log
+        )
         
-        # 获取建议
+        if is_duplicate:
+            self.stats['duplicates_found'] += 1
+            self.stats['duplicates_moved'] += 1
+            return 'duplicate'
+        
+        # 分类处理
         suggestions = self.predict_with_suggestions(filename, top_k=3)
         
         if suggestions and suggestions[0][1] >= MIN_CONFIDENCE_THRESHOLD:
-            # 有匹配建议 → 自动分类到目标目录
             target_sub = suggestions[0][0]
-            self.log(f"🤖 自动分类: {filename} -> {target_sub} (置信度: {suggestions[0][1]:.2f})")
+            self.log(f"🤖 自动分类: {filename} -> {target_sub}")
             success = self._move_file(path, filename, target_sub)
             if success:
                 self.stats['auto_classified'] += 1
-                self.save_db()
                 return 'auto'
             else:
                 return 'error'
         else:
-            # 无匹配建议 → 自动移至未分类文件夹
             self.log(f"⏭️ 无匹配建议，移至未分类: {filename}")
             self._move_to_unknown(path, filename)
             self.stats['unknown_moved'] += 1
-            self.save_db()
             return 'unknown'
     
     def _move_to_unknown(self, path, filename):
-        """将文件移到未分类目录"""
+        """移到未分类文件夹"""
         os.makedirs(self.unknown_folder, exist_ok=True)
         
-        # 处理重名文件
         unknown_path = os.path.join(self.unknown_folder, filename)
         if os.path.exists(unknown_path):
             name, ext = os.path.splitext(filename)
@@ -445,19 +781,17 @@ class SmartOrganizerEngine:
         try:
             shutil.move(path, unknown_path)
             self.log(f"⏭️ 已移至未分类: {os.path.basename(unknown_path)}")
-            self._write_log(f"未分类: {filename} -> {os.path.basename(unknown_path)}")
         except Exception as e:
             self.log(f"❌ 移动失败: {e}")
             self.stats['errors'] += 1
     
     def _move_file(self, path, filename, target_sub):
-        """执行文件移动"""
+        """移动文件到目标目录"""
         target_dir = os.path.join(self.base_target, target_sub)
         os.makedirs(target_dir, exist_ok=True)
         
         target_path = os.path.join(target_dir, filename)
         
-        # 处理重名文件
         if os.path.exists(target_path):
             name, ext = os.path.splitext(filename)
             counter = 1
@@ -472,55 +806,36 @@ class SmartOrganizerEngine:
         try:
             shutil.move(path, target_path)
             self.log(f"✅ 已移动: {filename} -> {target_sub}")
-            self._write_log(f"移动: {filename} -> {target_sub}")
-            
-            # 学习这个分类
             self.learn(filename, target_sub)
             return True
         except Exception as e:
             self.log(f"❌ 移动失败: {e}")
-            self._write_log(f"失败: {filename} | {e}")
             self.stats['errors'] += 1
             return False
     
     def process_unknown_file(self, filepath, target_sub):
-        """从未分类文件夹处理文件，移到目标目录"""
+        """处理未分类文件"""
         filename = os.path.basename(filepath)
         return self._move_file(filepath, filename, target_sub)
     
-    def _write_log(self, msg):
-        """写入日志文件"""
-        try:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now().isoformat()} - {msg}\n")
-        except:
-            pass
-    
     def handle_user_choice(self, filename, path, choice, suggestions):
-        """处理用户的选择"""
+        """处理用户选择"""
         if choice is None:
-            # 跳过 -> 移到未分类
             self._move_to_unknown(path, filename)
             self.stats['unknown_moved'] += 1
             return
         
-        if isinstance(choice, int):
-            # 选择了建议中的某一条
-            if choice < len(suggestions):
-                target_sub = suggestions[choice][0]
-            else:
-                target_sub = "未分类"
+        if isinstance(choice, int) and choice < len(suggestions):
+            target_sub = suggestions[choice][0]
         else:
-            # 手动输入
             target_sub = choice
         
         success = self._move_file(path, filename, target_sub)
         if success:
             self.stats['manual_classified'] += 1
-        self.save_db()
     
     def start(self):
-        """启动文件监听"""
+        """启动监听"""
         if self.is_running:
             return
         
@@ -529,9 +844,11 @@ class SmartOrganizerEngine:
         os.makedirs(self.data_folder, exist_ok=True)
         
         self.log("🚀 启动文件监听器...")
-        self.log(f"📁 程序数据目录: {self.data_folder}")
+        self.log(f"📁 数据库路径: {self.db_manager.base_path}")
         self.log(f"📁 未分类文件夹: {self.unknown_folder}")
-        self.log(f"📁 日志文件: {self.log_file}")
+        self.log(f"📁 重复文件夹: {self.deduplicator.duplicate_folder}")
+        self.log(f"📁 数据目录: {self.data_folder}")
+        self.log(f"📊 学习数据: {len(self.db_manager.memory)} 条")
         
         self.observer = Observer()
         handler = self._create_handler()
@@ -540,16 +857,14 @@ class SmartOrganizerEngine:
         self.log("✔ 文件监听已启动")
     
     def _create_handler(self):
-        """创建文件事件处理器"""
+        """创建事件处理器"""
         engine = self
         
         class Handler(FileSystemEventHandler):
             def on_created(self, event):
                 if event.is_directory:
                     return
-                # 延迟一下，确保文件写入完成
                 time.sleep(0.5)
-                # 检查文件是否完全写入
                 if os.path.exists(event.src_path):
                     engine.pending_files.put(("process", event.src_path))
             
@@ -562,50 +877,15 @@ class SmartOrganizerEngine:
         return Handler()
     
     def stop(self):
-        """停止文件监听"""
+        """停止监听"""
         if self.observer:
             self.observer.stop()
             self.observer.join()
         self.is_running = False
         self.log("🛑 监听器已停止")
     
-    def process_existing_files(self, progress_callback=None):
-        """处理已存在的文件"""
-        self.log("📂 检查现有文件...")
-        files = []
-        for f in os.listdir(self.watch_folder):
-            file_path = os.path.join(self.watch_folder, f)
-            if os.path.isfile(file_path):
-                files.append(file_path)
-        
-        if not files:
-            self.log("✔ 没有需要处理的现有文件")
-            return {'processed': 0, 'auto': 0, 'unknown': 0, 'duplicate': 0}
-        
-        self.log(f"发现 {len(files)} 个现有文件待处理")
-        
-        results = {
-            'processed': 0,
-            'auto': 0,
-            'unknown': 0,
-            'duplicate': 0,
-            'skipped': 0,
-            'error': 0
-        }
-        
-        for i, file_path in enumerate(files):
-            if progress_callback:
-                progress_callback(i, len(files), os.path.basename(file_path))
-            
-            result = self.process_file(file_path)
-            if result in results:
-                results[result] += 1
-        
-        self.log(f"✔ 现有文件处理完成: {results}")
-        return results
-    
     def get_pending_file(self):
-        """获取等待处理的文件"""
+        """获取待处理文件"""
         try:
             return self.pending_files.get_nowait()
         except queue.Empty:
@@ -613,12 +893,19 @@ class SmartOrganizerEngine:
     
     def get_stats(self):
         """获取统计信息"""
+        dup_stats = self.deduplicator.get_duplicate_stats()
+        db_stats = self.db_manager.get_stats()
+        
         return {
             **self.stats,
-            'learning_items': len(self.memory),
+            'learning_items': len(self.db_manager.memory),
             'unknown_folder_size': self._get_folder_size(self.unknown_folder),
             'watch_folder_files': len([f for f in os.listdir(self.watch_folder) 
-                                      if os.path.isfile(os.path.join(self.watch_folder, f))])
+                                      if os.path.isfile(os.path.join(self.watch_folder, f))]),
+            'duplicate_folder': dup_stats['duplicate_folder'],
+            'duplicate_count': dup_stats['duplicate_count'],
+            'duplicate_folder_size': dup_stats['folder_size'],
+            'db_stats': db_stats
         }
     
     def _get_folder_size(self, folder):
@@ -632,10 +919,38 @@ class SmartOrganizerEngine:
                     except:
                         pass
         return total
+    
+    def process_existing_files(self, progress_callback=None):
+        """处理现有文件"""
+        self.log("📂 检查现有文件...")
+        files = []
+        for f in os.listdir(self.watch_folder):
+            file_path = os.path.join(self.watch_folder, f)
+            if os.path.isfile(file_path):
+                files.append(file_path)
+        
+        if not files:
+            self.log("✔ 没有需要处理的现有文件")
+            return {'processed': 0, 'auto': 0, 'unknown': 0, 'duplicate': 0}
+        
+        self.log(f"发现 {len(files)} 个现有文件待处理")
+        
+        results = {'processed': 0, 'auto': 0, 'unknown': 0, 'duplicate': 0, 'skipped': 0, 'error': 0}
+        
+        for i, file_path in enumerate(files):
+            if progress_callback:
+                progress_callback(i, len(files), os.path.basename(file_path))
+            
+            result = self.process_file(file_path)
+            if result in results:
+                results[result] += 1
+        
+        self.log(f"✔ 现有文件处理完成: {results}")
+        return results
 
-# ==================== 目录树选择对话框（增强版） ====================
+# ==================== 目录树选择对话框 ====================
 class EnhancedFolderTreeDialog:
-    """增强版目录树选择对话框"""
+    """目录树选择对话框"""
     
     def __init__(self, parent, base_path, filename, current_path="",
                  suggestions=None, engine=None, show_preview=True):
@@ -648,7 +963,6 @@ class EnhancedFolderTreeDialog:
         self.show_preview = show_preview
         self.selected_path = None
         self.result = None
-        self.file_preview = None
         
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"选择分类目录 - {filename}")
@@ -659,129 +973,61 @@ class EnhancedFolderTreeDialog:
         self._create_widgets()
         self._load_tree()
         
-        # 居中显示
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() - 750) // 2
         y = (self.dialog.winfo_screenheight() - 600) // 2
         self.dialog.geometry(f"+{x}+{y}")
     
     def _create_widgets(self):
-        """创建界面组件"""
-        # 主布局：左侧目录树，右侧信息预览
         main_paned = ttk.PanedWindow(self.dialog, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # ===== 左侧：目录树 =====
         left_frame = ttk.Frame(main_paned)
         main_paned.add(left_frame, weight=2)
         
-        # 顶部信息
         info_frame = ttk.Frame(left_frame)
         info_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(info_frame, text=f"📄 {self.filename}", font=("", 10, "bold")).pack(anchor=tk.W)
         
-        ttk.Label(info_frame, text=f"📄 {self.filename}", 
-                  font=("", 10, "bold")).pack(anchor=tk.W)
-        
-        # 建议按钮区域
         if self.suggestions:
             suggest_frame = ttk.LabelFrame(left_frame, text="💡 匹配建议", padding="5")
             suggest_frame.pack(fill=tk.X, pady=(0, 5))
-            
             for idx, (path, score) in enumerate(self.suggestions):
-                btn = ttk.Button(
-                    suggest_frame,
-                    text=f"📁 {path} ({score:.2f})",
-                    command=lambda i=idx: self._quick_select(i)
-                )
+                btn = ttk.Button(suggest_frame, text=f"📁 {path} ({score:.2f})",
+                               command=lambda i=idx: self._quick_select(i))
                 btn.pack(side=tk.LEFT, padx=2, pady=2)
         
-        # 当前路径
         path_frame = ttk.Frame(left_frame)
         path_frame.pack(fill=tk.X, pady=(0, 5))
-        
         ttk.Label(path_frame, text="路径:").pack(side=tk.LEFT)
         self.path_var = tk.StringVar(value=self.current_path or self.base_path)
         path_entry = ttk.Entry(path_frame, textvariable=self.path_var, state="readonly")
         path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
-        # 目录树
         tree_frame = ttk.Frame(left_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
-        
         scrollbar = ttk.Scrollbar(tree_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
         self.tree = ttk.Treeview(tree_frame, yscrollcommand=scrollbar.set, height=12)
         self.tree.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.tree.yview)
-        
         self.tree.bind("<Double-1>", self._on_double_click)
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
         
-        # 按钮区域
         btn_frame = ttk.Frame(left_frame)
         btn_frame.pack(fill=tk.X, pady=5)
-        
         ttk.Button(btn_frame, text="📁 上级目录", command=self._go_up).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="📂 选择此目录", command=self._confirm).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="📂 选择并学习", command=self._confirm_and_learn).pack(side=tk.LEFT, padx=2)
-        
         ttk.Button(btn_frame, text="⏭️ 跳过", command=self._skip).pack(side=tk.RIGHT, padx=2)
         ttk.Button(btn_frame, text="取消", command=self._cancel).pack(side=tk.RIGHT, padx=2)
-        
-        # ===== 右侧：文件预览 =====
-        right_frame = ttk.Frame(main_paned)
-        main_paned.add(right_frame, weight=1)
-        
-        if self.show_preview:
-            preview_frame = ttk.LabelFrame(right_frame, text="📋 文件预览", padding="10")
-            preview_frame.pack(fill=tk.BOTH, expand=True)
-            
-            # 文件信息
-            self.preview_text = scrolledtext.ScrolledText(preview_frame, height=15, 
-                                                         font=("Consolas", 9))
-            self.preview_text.pack(fill=tk.BOTH, expand=True)
-            
-            # 显示文件信息
-            self._show_file_info()
-    
-    def _show_file_info(self):
-        """显示文件信息"""
-        if not self.filename:
-            return
-        
-        info = f"文件名: {self.filename}\n"
-        info += f"扩展名: {os.path.splitext(self.filename)[1] or '无'}\n"
-        info += "-" * 40 + "\n"
-        
-        # 尝试获取文件大小（如果存在）
-        unknown_folder = os.path.join(os.path.dirname(os.path.dirname(self.base_path)), "未分类文件")
-        filepath = os.path.join(unknown_folder, self.filename)
-        if os.path.exists(filepath):
-            size = os.path.getsize(filepath)
-            info += f"文件大小: {self._format_size(size)}\n"
-            info += f"修改时间: {datetime.fromtimestamp(os.path.getmtime(filepath)).strftime('%Y-%m-%d %H:%M:%S')}\n"
-        
-        self.preview_text.insert(tk.END, info)
-        self.preview_text.config(state=tk.DISABLED)
-    
-    def _format_size(self, size):
-        """格式化文件大小"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} TB"
     
     def _quick_select(self, idx):
-        """快速选择建议路径"""
         if idx < len(self.suggestions):
             self.selected_path = self.suggestions[idx][0]
             self.result = "confirm"
             self.dialog.destroy()
     
     def _load_tree(self, path=None):
-        """加载目录树"""
         if path is None:
             path = self.current_path or self.base_path
         
@@ -793,7 +1039,6 @@ class EnhancedFolderTreeDialog:
             for name in os.listdir(path):
                 full_path = os.path.join(path, name)
                 if os.path.isdir(full_path) and not name.startswith("."):
-                    # 检查子目录
                     has_children = any(
                         os.path.isdir(os.path.join(full_path, sub)) and not sub.startswith(".")
                         for sub in os.listdir(full_path)
@@ -801,51 +1046,29 @@ class EnhancedFolderTreeDialog:
                     items.append((name, full_path, has_children))
             
             items.sort(key=lambda x: x[0])
-            
             for name, full_path, has_children in items:
-                display_path = full_path.replace(self.base_path, "").strip("\\/") or name
-                node = self.tree.insert("", "end", text=name, 
-                                       values=(full_path, display_path, has_children))
+                node = self.tree.insert("", "end", text=name, values=(full_path, has_children))
                 if has_children:
-                    # 添加占位子节点以便显示展开图标
                     self.tree.insert(node, "end", text="")
             
             self.path_var.set(path)
-            
         except Exception as e:
             print(f"加载目录失败: {e}")
     
     def _on_double_click(self, event):
-        """双击进入子目录"""
         selected = self.tree.selection()
         if not selected:
             return
-        
         item = selected[0]
         values = self.tree.item(item, "values")
-        if len(values) < 2:
+        if len(values) < 1:
             return
-        
         full_path = values[0]
         if os.path.isdir(full_path):
             self.current_path = full_path
             self._load_tree(full_path)
     
-    def _on_select(self, event):
-        """选择事件 - 更新预览"""
-        selected = self.tree.selection()
-        if selected and self.show_preview:
-            item = selected[0]
-            values = self.tree.item(item, "values")
-            if len(values) >= 3 and values[2]:
-                self.preview_text.config(state=tk.NORMAL)
-                self.preview_text.delete(1.0, tk.END)
-                self.preview_text.insert(tk.END, f"📁 目录: {values[1]}\n")
-                self.preview_text.insert(tk.END, f"子目录数: {len(os.listdir(values[0])) if os.path.exists(values[0]) else 0}")
-                self.preview_text.config(state=tk.DISABLED)
-    
     def _go_up(self):
-        """回到上级目录"""
         parent = os.path.dirname(self.current_path)
         if parent and os.path.exists(parent) and parent.startswith(self.base_path):
             self.current_path = parent
@@ -854,7 +1077,6 @@ class EnhancedFolderTreeDialog:
             messagebox.showinfo("提示", "已在根目录")
     
     def _confirm(self):
-        """确认选择当前目录"""
         selected = self.tree.selection()
         if selected:
             full_path = self.tree.item(selected[0], "values")[0]
@@ -866,7 +1088,6 @@ class EnhancedFolderTreeDialog:
             messagebox.showwarning("提示", "请选择一个目录")
     
     def _confirm_and_learn(self):
-        """确认选择当前目录并学习"""
         selected = self.tree.selection()
         if selected:
             full_path = self.tree.item(selected[0], "values")[0]
@@ -878,57 +1099,49 @@ class EnhancedFolderTreeDialog:
             messagebox.showwarning("提示", "请选择一个目录")
     
     def _skip(self):
-        """跳过"""
         self.result = "skip"
         self.dialog.destroy()
     
     def _cancel(self):
-        """取消"""
         self.result = "cancel"
         self.dialog.destroy()
 
-# ==================== GUI 应用程序（增强版） ====================
+# ==================== GUI 应用程序 ====================
 class SmartOrganizerApp:
-    """主窗口 - 增强版"""
+    """主窗口"""
     
     def __init__(self, root):
         self.root = root
-        self.root.title("智能文件分类器 v4 - 增强版")
+        self.root.title("智能文件分类器 v5 - 独立数据库版")
         self.root.geometry("1100x800")
         self.root.resizable(True, True)
         
-        # 状态变量
+        # 初始化数据库管理器
+        self.db_manager = DatabaseManager()
+        
         self.engine = None
         self.is_auto_mode = tk.BooleanVar(value=False)
         self.is_running = False
         self.current_file = None
-        self.processing_queue = []
-        self.undo_stack = []
         
-        # 创建界面
         self._create_widgets()
         
-        # 默认配置
         self.watch_entry.insert(0, DEFAULT_WATCH_FOLDER)
         self.target_entry.insert(0, DEFAULT_BASE_TARGET)
         
-        # 更新日志
         self.log("=" * 60)
-        self.log("👋 欢迎使用智能文件分类器 v4 - 增强版")
-        self.log("📌 新功能：文件去重检测、批量处理进度、操作撤销")
-        self.log("📌 有匹配建议 → 自动移至目标目录")
-        self.log("📌 无匹配建议 → 自动移至未分类文件夹")
-        self.log("📌 点击「📂 批量处理未分类文件」手动归类")
+        self.log("👋 欢迎使用智能文件分类器 v5 - 独立数据库版")
+        self.log(f"📁 数据库路径: {self.db_manager.base_path}")
+        self.log(f"📊 学习数据: {len(self.db_manager.memory)} 条")
+        self.log(f"🔄 重复文件: {len(self.db_manager.duplicate_log)} 条")
+        self.log("📌 数据库独立存储，程序更新不影响学习数据")
         self.log("=" * 60)
         self.log("请检查配置路径，然后点击「🚀 启动服务」")
     
     def _create_widgets(self):
-        """创建界面组件"""
-        # 主容器
         main_paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # ===== 上方：配置和控制区域 =====
         top_frame = ttk.Frame(main_paned)
         main_paned.add(top_frame, weight=1)
         
@@ -936,13 +1149,11 @@ class SmartOrganizerApp:
         config_frame = ttk.LabelFrame(top_frame, text="⚙️ 配置", padding="10")
         config_frame.pack(fill=tk.X, pady=(0, 5))
         
-        # 监听目录
         ttk.Label(config_frame, text="📁 监听目录:").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.watch_entry = ttk.Entry(config_frame, width=50)
         self.watch_entry.grid(row=0, column=1, padx=(5, 5), pady=2)
         ttk.Button(config_frame, text="浏览", command=self._browse_watch).grid(row=0, column=2, pady=2)
         
-        # 目标目录
         ttk.Label(config_frame, text="🎯 目标目录:").grid(row=1, column=0, sticky=tk.W, pady=2)
         self.target_entry = ttk.Entry(config_frame, width=50)
         self.target_entry.grid(row=1, column=1, padx=(5, 5), pady=2)
@@ -960,12 +1171,16 @@ class SmartOrganizerApp:
         
         ttk.Button(control_frame, text="📂 处理现有", command=self._process_existing).pack(side=tk.LEFT, padx=2)
         ttk.Button(control_frame, text="📂 批量处理未分类", command=self._batch_process_unknown).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="🔄 查看重复文件", command=self._view_duplicates).pack(side=tk.LEFT, padx=2)
         
         ttk.Separator(control_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y, ipady=10)
         
         ttk.Button(control_frame, text="📊 统计", command=self._show_stats).pack(side=tk.LEFT, padx=2)
         ttk.Button(control_frame, text="📚 学习数据", command=self._show_memory).pack(side=tk.LEFT, padx=2)
-        ttk.Button(control_frame, text="🗑️ 清空数据库", command=self._clear_db).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="📥 导入数据", command=self._import_data).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="📤 导出数据", command=self._export_data).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="💾 备份数据", command=self._backup_data).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="🗑️ 清空数据", command=self._clear_data).pack(side=tk.LEFT, padx=2)
         
         # 状态信息栏
         status_info_frame = ttk.Frame(config_frame)
@@ -973,26 +1188,26 @@ class SmartOrganizerApp:
         
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(status_info_frame, textvariable=self.status_var, font=("", 9, "bold")).pack(side=tk.LEFT)
-        
         ttk.Separator(status_info_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y, ipady=5)
         
-        self.stats_var = tk.StringVar(value="处理: 0 | 自动: 0 | 手动: 0 | 未分类: 0")
+        self.stats_var = tk.StringVar(value="处理: 0 | 自动: 0 | 手动: 0 | 未分类: 0 | 重复: 0")
         ttk.Label(status_info_frame, textvariable=self.stats_var, font=("", 9)).pack(side=tk.LEFT)
+        ttk.Separator(status_info_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y, ipady=5)
         
-        # ===== 中间：文件交互区域 =====
+        self.db_info_var = tk.StringVar(value=f"📊 学习: {len(self.db_manager.memory)} | 重复: {len(self.db_manager.duplicate_log)}")
+        ttk.Label(status_info_frame, textvariable=self.db_info_var, font=("", 9), foreground="blue").pack(side=tk.LEFT)
+        
+        # 交互区域
         interact_frame = ttk.LabelFrame(top_frame, text="📋 文件分类确认", padding="10")
         interact_frame.pack(fill=tk.X, pady=5)
         
-        # 当前文件信息
         self.interact_label = ttk.Label(interact_frame, text="等待文件...", font=("", 10, "bold"))
         self.interact_label.pack(anchor=tk.W)
         
-        # 建议按钮区域
         self.suggest_frame = ttk.Frame(interact_frame)
         self.suggest_frame.pack(fill=tk.X, pady=(5, 0))
         self.suggest_buttons = []
         
-        # 手动输入区域
         manual_frame = ttk.Frame(interact_frame)
         manual_frame.pack(fill=tk.X, pady=(5, 0))
         
@@ -1004,15 +1219,13 @@ class SmartOrganizerApp:
         ttk.Button(manual_frame, text="📂 浏览目录", command=self._open_folder_tree).pack(side=tk.LEFT, padx=2)
         ttk.Button(manual_frame, text="✅ 确认", command=self._manual_confirm).pack(side=tk.LEFT, padx=2)
         ttk.Button(manual_frame, text="⏭️ 跳过", command=self._skip_file).pack(side=tk.LEFT, padx=2)
-        ttk.Button(manual_frame, text="↩️ 撤销", command=self._undo_last).pack(side=tk.LEFT, padx=2)
         
         self.hint_label = ttk.Label(interact_frame, text="💡 选择建议路径或点击「浏览目录」从树形目录选择", 
                                    foreground="gray")
         self.hint_label.pack(anchor=tk.W, pady=(5, 0))
-        
         self._set_interact_enabled(False)
         
-        # ===== 下方：日志区域 =====
+        # 日志区域
         log_frame = ttk.LabelFrame(top_frame, text="📝 日志", padding="10")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
         
@@ -1024,66 +1237,53 @@ class SmartOrganizerApp:
         ttk.Button(log_control, text="清空日志", command=self._clear_log).pack(side=tk.LEFT)
         ttk.Button(log_control, text="导出日志", command=self._export_log).pack(side=tk.LEFT, padx=5)
         
-        # 进度条（处理现有文件时显示）
         self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(log_control, variable=self.progress_var, 
-                                           maximum=100, length=200)
+        self.progress_bar = ttk.Progressbar(log_control, variable=self.progress_var, maximum=100, length=200)
         self.progress_bar.pack(side=tk.RIGHT)
-        
         self.progress_label = ttk.Label(log_control, text="")
         self.progress_label.pack(side=tk.RIGHT, padx=5)
     
     def _set_interact_enabled(self, enabled):
-        """设置交互区域是否可用"""
         state = "normal" if enabled else "disabled"
         for btn in self.suggest_buttons:
             btn.config(state=state)
         self.manual_entry.config(state=state)
     
     def _browse_watch(self):
-        """浏览监听目录"""
         path = filedialog.askdirectory(title="选择监听目录")
         if path:
             self.watch_entry.delete(0, tk.END)
             self.watch_entry.insert(0, path)
     
     def _browse_target(self):
-        """浏览目标目录"""
         path = filedialog.askdirectory(title="选择目标目录")
         if path:
             self.target_entry.delete(0, tk.END)
             self.target_entry.insert(0, path)
     
     def log(self, msg):
-        """在日志区域显示消息"""
         self.log_text.insert(tk.END, msg + "\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
     
     def _clear_log(self):
-        """清空日志"""
         self.log_text.delete(1.0, tk.END)
     
     def _export_log(self):
-        """导出日志"""
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
-        )
+        file_path = filedialog.asksaveasfilename(defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
         if file_path:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(self.log_text.get(1.0, tk.END))
             self.log(f"📤 日志已导出: {file_path}")
     
     def _toggle_service(self):
-        """启动/停止服务"""
         if not self.is_running:
             self._start_service()
         else:
             self._stop_service()
     
     def _start_service(self):
-        """启动服务"""
         watch_folder = self.watch_entry.get().strip()
         base_target = self.target_entry.get().strip()
         
@@ -1097,9 +1297,7 @@ class SmartOrganizerApp:
         
         try:
             self.engine = SmartOrganizerEngine(
-                watch_folder, 
-                base_target,
-                log_callback=self.log
+                watch_folder, base_target, self.db_manager, log_callback=self.log
             )
             
             self.engine.start()
@@ -1108,11 +1306,7 @@ class SmartOrganizerApp:
             self.status_var.set("🟢 运行中")
             
             self.log(f"✔ 服务已启动，监听: {watch_folder}")
-            
-            # 启动后台处理线程
             self._start_background_thread()
-            
-            # 更新统计
             self._update_stats()
             
         except Exception as e:
@@ -1120,7 +1314,6 @@ class SmartOrganizerApp:
             messagebox.showerror("错误", f"启动失败: {e}")
     
     def _stop_service(self):
-        """停止服务"""
         if self.engine:
             self.engine.stop()
         self.is_running = False
@@ -1131,7 +1324,6 @@ class SmartOrganizerApp:
         self._clear_interaction()
     
     def _start_background_thread(self):
-        """启动后台处理线程"""
         def background_worker():
             while self.is_running:
                 if self.engine:
@@ -1146,62 +1338,42 @@ class SmartOrganizerApp:
         thread.start()
     
     def _handle_auto_process(self, path):
-        """自动处理文件"""
         if self.engine:
             result = self.engine.process_file(path)
             self._update_stats()
             if result == 'unknown':
-                # 无匹配，提示用户手动分类
                 self.root.after(0, lambda: self._prompt_manual_classify(path))
     
     def _prompt_manual_classify(self, path):
-        """提示用户手动分类"""
         if not os.path.exists(path):
             return
         
         filename = os.path.basename(path)
         suggestions = self.engine.predict_with_suggestions(filename, top_k=3)
         
-        self.current_file = {
-            'filename': filename,
-            'path': path,
-            'suggestions': suggestions
-        }
-        
+        self.current_file = {'filename': filename, 'path': path, 'suggestions': suggestions}
         self._show_interaction(self.current_file)
     
     def _show_interaction(self, data):
-        """显示交互界面"""
         filename = data["filename"]
         suggestions = data["suggestions"]
         self.current_file = data
         
         if suggestions:
-            self.interact_label.config(
-                text=f"📄 新文件: {filename}  —  请选择分类方式",
-                foreground="blue"
-            )
+            self.interact_label.config(text=f"📄 新文件: {filename}  —  请选择分类方式", foreground="blue")
             self.hint_label.config(text="💡 点击建议按钮，或点击「浏览目录」从树形目录选择")
         else:
-            self.interact_label.config(
-                text=f"📄 新文件: {filename}  —  暂无匹配建议，请手动选择",
-                foreground="orange"
-            )
+            self.interact_label.config(text=f"📄 新文件: {filename}  —  暂无匹配建议，请手动选择", foreground="orange")
             self.hint_label.config(text="💡 暂无相似历史记录，点击「浏览目录」选择分类路径")
         
-        # 清除旧按钮
         for btn in self.suggest_buttons:
             btn.destroy()
         self.suggest_buttons.clear()
         
-        # 创建建议按钮
         if suggestions:
             for idx, (path, score) in enumerate(suggestions):
-                btn = ttk.Button(
-                    self.suggest_frame,
-                    text=f"📁 {path} ({score:.2f})",
-                    command=lambda i=idx: self._suggest_confirm(i)
-                )
+                btn = ttk.Button(self.suggest_frame, text=f"📁 {path} ({score:.2f})",
+                               command=lambda i=idx: self._suggest_confirm(i))
                 btn.pack(side=tk.LEFT, padx=2, pady=2)
                 self.suggest_buttons.append(btn)
         
@@ -1213,7 +1385,6 @@ class SmartOrganizerApp:
         self.root.attributes('-topmost', False)
     
     def _open_folder_tree(self):
-        """打开目录树选择对话框"""
         if not self.engine:
             return
         
@@ -1229,8 +1400,7 @@ class SmartOrganizerApp:
         dialog = EnhancedFolderTreeDialog(
             self.root, base_path, filename, full_current,
             suggestions=self.current_file.get("suggestions", []) if self.current_file else [],
-            engine=self.engine,
-            show_preview=True
+            engine=self.engine, show_preview=True
         )
         self.root.wait_window(dialog.dialog)
         
@@ -1248,7 +1418,6 @@ class SmartOrganizerApp:
             self._skip_file()
     
     def _suggest_confirm(self, idx):
-        """确认建议"""
         if self.current_file and self.engine:
             filename = self.current_file["filename"]
             suggestions = self.current_file.get("suggestions", [])
@@ -1258,14 +1427,12 @@ class SmartOrganizerApp:
                 self.engine.handle_user_choice(
                     self.current_file["filename"],
                     self.current_file["path"],
-                    idx,
-                    suggestions
+                    idx, suggestions
                 )
                 self._update_stats()
                 self._clear_interaction()
     
     def _manual_confirm(self):
-        """手动输入确认"""
         target = self.manual_entry.get().strip()
         if not target:
             messagebox.showwarning("提示", "请输入分类路径\n或点击「浏览目录」选择")
@@ -1285,7 +1452,6 @@ class SmartOrganizerApp:
             self._clear_interaction()
     
     def _skip_file(self):
-        """跳过文件"""
         if self.current_file and self.engine:
             filename = self.current_file["filename"]
             self.log(f"⏭️ 跳过: {filename} -> 移至未分类")
@@ -1298,19 +1464,7 @@ class SmartOrganizerApp:
             self._update_stats()
             self._clear_interaction()
     
-    def _undo_last(self):
-        """撤销上次操作"""
-        if not self.undo_stack:
-            messagebox.showinfo("提示", "没有可撤销的操作")
-            return
-        
-        # 实现撤销逻辑
-        last_action = self.undo_stack.pop()
-        self.log(f"↩️ 撤销: {last_action}")
-        # TODO: 实现具体的撤销功能
-    
     def _clear_interaction(self):
-        """清理交互状态"""
         self.current_file = None
         self.interact_label.config(text="等待文件...", foreground="black")
         self.hint_label.config(text="💡 选择建议路径或点击「浏览目录」从树形目录选择")
@@ -1323,7 +1477,6 @@ class SmartOrganizerApp:
         self.manual_entry.delete(0, tk.END)
     
     def _process_existing(self):
-        """处理现有文件"""
         if not self.engine or not self.is_running:
             messagebox.showwarning("提示", "请先启动服务")
             return
@@ -1343,10 +1496,9 @@ class SmartOrganizerApp:
         self.progress_var.set(0)
         self.progress_label.config(text="")
         
-        self.log(f"✔ 处理完成: 自动分类 {results['auto']}, 未分类 {results['unknown']}, 重复 {results['duplicate']}")
+        self.log(f"✔ 处理完成: 自动 {results['auto']}, 未分类 {results['unknown']}, 重复 {results['duplicate']}")
     
     def _batch_process_unknown(self):
-        """批量处理未分类文件"""
         if not self.engine or not self.is_running:
             messagebox.showwarning("提示", "请先启动服务")
             return
@@ -1372,7 +1524,6 @@ class SmartOrganizerApp:
             
             suggestions = self.engine.predict_with_suggestions(filename, top_k=3)
             
-            # 如果是自动模式且有建议，自动处理
             if suggestions and self.is_auto_mode.get() and suggestions[0][1] >= MIN_CONFIDENCE_THRESHOLD:
                 target_sub = suggestions[0][0]
                 self.log(f"🤖 自动处理: {filename} -> {target_sub}")
@@ -1380,15 +1531,10 @@ class SmartOrganizerApp:
                 processed += 1
                 continue
             
-            # 弹出目录树对话框
             dialog = EnhancedFolderTreeDialog(
-                self.root,
-                self.engine.base_target,
-                filename,
-                self.engine.base_target,
-                suggestions=suggestions,
-                engine=self.engine,
-                show_preview=True
+                self.root, self.engine.base_target, filename,
+                self.engine.base_target, suggestions=suggestions,
+                engine=self.engine, show_preview=True
             )
             self.root.wait_window(dialog.dialog)
             
@@ -1408,7 +1554,6 @@ class SmartOrganizerApp:
                     self.log(f"🛑 取消，剩余 {remaining} 个文件")
                 break
             
-            # 更新进度
             self.progress_var.set((i / len(files)) * 100)
             self.progress_label.config(text=f"{i}/{len(files)}")
         
@@ -1417,59 +1562,82 @@ class SmartOrganizerApp:
         self.progress_label.config(text="")
         self.log(f"✔️ 批量处理完成，已处理 {processed} 个文件")
     
+    def _view_duplicates(self):
+        if not self.engine:
+            messagebox.showwarning("提示", "请先启动服务")
+            return
+        
+        duplicate_log = self.db_manager.duplicate_log
+        if not duplicate_log:
+            messagebox.showinfo("提示", "暂无重复文件记录")
+            return
+        
+        text = f"📋 重复文件记录 (共 {len(duplicate_log)} 个)\n"
+        text += "=" * 60 + "\n\n"
+        
+        for i, entry in enumerate(duplicate_log[-50:], 1):
+            text += f"{i}. {entry['filename']}\n"
+            text += f"   原始文件: {entry['original']}\n"
+            text += f"   时间: {entry['timestamp'][:19]}\n\n"
+        
+        if len(duplicate_log) > 50:
+            text += f"... 还有 {len(duplicate_log) - 50} 条记录\n"
+        
+        win = tk.Toplevel(self.root)
+        win.title("重复文件记录")
+        win.geometry("700x500")
+        
+        text_widget = scrolledtext.ScrolledText(win, font=("Consolas", 10))
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        text_widget.insert(1.0, text)
+        text_widget.config(state=tk.DISABLED)
+        
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_frame, text="📂 打开重复文件夹", 
+                  command=lambda: os.startfile(self.engine.deduplicator.duplicate_folder)).pack(side=tk.LEFT, padx=2)
+    
     def _show_stats(self):
-        """显示统计信息"""
         if not self.engine:
             messagebox.showwarning("提示", "请先启动服务")
             return
         
         stats = self.engine.get_stats()
+        db_stats = stats.get('db_stats', {})
+        
         text = "📊 统计信息\n" + "=" * 40 + "\n\n"
         text += f"📄 总处理文件: {stats['total_processed']}\n"
         text += f"🤖 自动分类: {stats['auto_classified']}\n"
         text += f"👤 手动分类: {stats['manual_classified']}\n"
         text += f"⏭️ 移至未分类: {stats['unknown_moved']}\n"
         text += f"🔄 重复文件: {stats['duplicates_found']}\n"
-        text += f"❌ 错误: {stats['errors']}\n"
-        text += f"\n📚 学习数据: {stats['learning_items']} 条\n"
-        text += f"📁 未分类文件夹大小: {self._format_size(stats['unknown_folder_size'])}\n"
-        text += f"📂 监听目录文件: {stats['watch_folder_files']} 个\n"
+        text += f"❌ 错误: {stats['errors']}\n\n"
+        
+        text += "📚 数据库信息\n" + "-" * 40 + "\n"
+        text += f"数据库路径: {db_stats.get('database_path', 'unknown')}\n"
+        text += f"数据库版本: {db_stats.get('db_version', 'unknown')}\n"
+        text += f"学习数据: {db_stats.get('total_learnings', 0)} 条\n"
+        text += f"重复记录: {db_stats.get('total_duplicates', 0)} 条\n"
+        text += f"哈希缓存: {db_stats.get('hash_cache_size', 0)} 个\n"
+        text += f"创建时间: {db_stats.get('created_at', 'unknown')[:10]}\n"
+        text += f"最后更新: {db_stats.get('last_updated', 'unknown')[:10]}\n\n"
+        
+        text += "📁 文件夹信息\n" + "-" * 40 + "\n"
+        text += f"未分类文件夹: {stats.get('unknown_folder_size', 0)} 字节\n"
+        text += f"重复文件夹: {stats.get('duplicate_folder', '')}\n"
+        text += f"重复文件数: {stats.get('duplicate_count', 0)} 个\n"
         
         messagebox.showinfo("统计信息", text)
     
-    def _format_size(self, size):
-        """格式化文件大小"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} TB"
-    
-    def _update_stats(self):
-        """更新统计显示"""
-        if self.engine:
-            stats = self.engine.get_stats()
-            self.stats_var.set(
-                f"处理: {stats['total_processed']} | "
-                f"自动: {stats['auto_classified']} | "
-                f"手动: {stats['manual_classified']} | "
-                f"未分类: {stats['unknown_moved']} | "
-                f"重复: {stats['duplicates_found']}"
-            )
-    
     def _show_memory(self):
-        """显示学习数据"""
-        if not self.engine:
-            messagebox.showwarning("提示", "请先启动服务")
-            return
-        
-        memory = self.engine.memory
+        memory = self.db_manager.memory
         if not memory:
             messagebox.showinfo("学习数据", "数据库中暂无学习数据")
             return
         
-        text = "📚 学习数据 (文件名 -> 分类目标)\n"
+        text = f"📚 学习数据 (共 {len(memory)} 条)\n"
         text += "=" * 60 + "\n\n"
+        
         for i, item in enumerate(memory[-100:], 1):
             text += f"{i:3d}. {item['text']}\n"
             text += f"     └─> {item['path']}\n"
@@ -1489,20 +1657,70 @@ class SmartOrganizerApp:
         text_widget.insert(1.0, text)
         text_widget.config(state=tk.DISABLED)
     
-    def _clear_db(self):
-        """清空数据库"""
-        if not self.engine:
-            messagebox.showwarning("提示", "请先启动服务")
+    def _import_data(self):
+        """导入数据"""
+        file_path = filedialog.askopenfilename(
+            title="选择数据文件",
+            filetypes=[("JSON文件", "*.json"), ("数据库文件", "*.db"), ("所有文件", "*.*")]
+        )
+        if not file_path:
             return
         
-        if not messagebox.askyesno("⚠️ 确认", "确定要清空所有学习数据吗？此操作不可恢复！"):
+        success, msg = self.db_manager.import_learning_data(file_path)
+        if success:
+            messagebox.showinfo("成功", msg)
+            self._update_stats()
+            self.log(f"📥 数据导入成功: {msg}")
+        else:
+            messagebox.showerror("错误", msg)
+            self.log(f"❌ 数据导入失败: {msg}")
+    
+    def _export_data(self):
+        """导出数据"""
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")]
+        )
+        if not file_path:
             return
         
-        self.engine.memory = []
-        self.engine.index = faiss.IndexFlatL2(self.engine.dimension)
-        self.engine.save_db()
-        self.log("🗑️ 数据库已清空")
-        self._update_stats()
+        result = self.db_manager.export_learning_data(file_path)
+        if result:
+            messagebox.showinfo("成功", f"数据已导出到:\n{result}")
+            self.log(f"📤 数据已导出: {result}")
+        else:
+            messagebox.showerror("错误", "数据导出失败")
+    
+    def _backup_data(self):
+        """备份数据"""
+        backup_path = self.db_manager.create_backup()
+        if backup_path:
+            messagebox.showinfo("成功", f"数据已备份到:\n{backup_path}")
+            self.log(f"💾 数据已备份: {backup_path}")
+        else:
+            messagebox.showerror("错误", "备份失败")
+    
+    def _clear_data(self):
+        """清空数据"""
+        if self.db_manager.clear_all_data():
+            messagebox.showinfo("提示", "数据已清空")
+            self._update_stats()
+            self.log("🗑️ 数据已清空")
+    
+    def _update_stats(self):
+        if self.engine:
+            stats = self.engine.get_stats()
+            self.stats_var.set(
+                f"处理: {stats['total_processed']} | "
+                f"自动: {stats['auto_classified']} | "
+                f"手动: {stats['manual_classified']} | "
+                f"未分类: {stats['unknown_moved']} | "
+                f"重复: {stats['duplicates_found']}"
+            )
+            self.db_info_var.set(
+                f"📊 学习: {len(self.db_manager.memory)} | "
+                f"重复: {len(self.db_manager.duplicate_log)}"
+            )
 
 # ==================== 入口 ====================
 if __name__ == "__main__":
