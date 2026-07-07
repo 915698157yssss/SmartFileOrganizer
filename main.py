@@ -69,7 +69,7 @@ class DatabaseManager:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
-            except:
+            except Exception:
                 self.config = {}
         else:
             self.config = {
@@ -130,7 +130,7 @@ class DatabaseManager:
             if os.path.exists(self.db_file):
                 try:
                     shutil.copy2(self.db_file, self.db_backup_file)
-                except:
+                except Exception:
                     pass
             
             with open(self.db_file, 'w', encoding='utf-8') as f:
@@ -200,7 +200,16 @@ class DatabaseManager:
             try:
                 with open(self.hash_db_file, 'r', encoding='utf-8') as f:
                     self.hash_cache = json.load(f)
-            except:
+            except UnicodeDecodeError:
+                try:
+                    with open(self.hash_db_file, 'r', encoding='gbk') as f:
+                        self.hash_cache = json.load(f)
+                except Exception as e:
+                    print(f"加载哈希缓存失败: {e}")
+                    self.hash_cache = {}
+            except Exception as e:
+                print(f"加载哈希缓存失败: {e}")
+                self.hash_cache = {}
                 self.hash_cache = {}
         else:
             self.hash_cache = {}
@@ -217,7 +226,16 @@ class DatabaseManager:
             try:
                 with open(self.duplicate_log_file, 'r', encoding='utf-8') as f:
                     self.duplicate_log = json.load(f)
-            except:
+            except UnicodeDecodeError:
+                try:
+                    with open(self.duplicate_log_file, 'r', encoding='gbk') as f:
+                        self.duplicate_log = json.load(f)
+                except Exception as e:
+                    print(f"加载重复日志失败: {e}")
+                    self.duplicate_log = []
+            except Exception as e:
+                print(f"加载重复日志失败: {e}")
+                self.duplicate_log = []
                 self.duplicate_log = []
         else:
             self.duplicate_log = []
@@ -305,7 +323,7 @@ class FileDeduplicator:
         try:
             if os.path.getsize(filepath) == 0:
                 return (False, None, None)
-        except:
+        except Exception:
             return (False, None, None)
         
         file_hash = self.get_file_hash(filepath)
@@ -337,7 +355,7 @@ class FileDeduplicator:
             if path != current_path and hash_value == file_hash and os.path.exists(path):
                 try:
                     rel_path = os.path.relpath(path, self.watch_folder)
-                except:
+                except Exception:
                     rel_path = path
                 return {'original': rel_path, 'original_path': path, 'hash': file_hash}
         return None
@@ -370,7 +388,7 @@ class FileDeduplicator:
                 for f in files:
                     try:
                         total_size += os.path.getsize(os.path.join(root, f))
-                    except:
+                    except Exception:
                         pass
         return {
             'duplicate_folder': self.duplicate_folder,
@@ -403,6 +421,17 @@ class TrainingEngine:
             self.log_callback(full_msg)
         print(full_msg)
     
+    def _count_files(self, path):
+        """预计算文件总数，用于进度条"""
+        count = 0
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for f in files:
+                if f.startswith('.') or f.startswith('~$') or f.lower() in ['desktop.ini', 'thumbs.db', '.ds_store']:
+                    continue
+                count += 1
+        return count
+    
     def scan_target_folder(self, progress_callback=None):
         self.log("🔍 开始扫描目标文件夹...")
         self.log(f"📁 目标路径: {self.base_target_path}")
@@ -410,6 +439,10 @@ class TrainingEngine:
         if not os.path.exists(self.base_target_path):
             self.log("❌ 目标路径不存在")
             return []
+        
+        # 先统计总数，用于进度条
+        total_files = self._count_files(self.base_target_path)
+        self.log(f"📊 预计扫描 {total_files} 个文件...")
         
         learning_data = []
         file_count = 0
@@ -434,7 +467,7 @@ class TrainingEngine:
                     file_size = os.path.getsize(file_path)
                     if file_size == 0:
                         continue
-                except:
+                except Exception:
                     continue
                 
                 file_name_without_ext = os.path.splitext(file)[0]
@@ -454,7 +487,7 @@ class TrainingEngine:
                 self.statistics['categories'][relative_path if relative_path else '根目录'] += 1
                 
                 if progress_callback and file_count % 100 == 0:
-                    progress_callback(file_count, "扫描中...")
+                    progress_callback(file_count, total_files, "扫描中...")
         
         self.statistics['total_files'] = file_count
         self.statistics['total_folders'] = folder_count
@@ -681,21 +714,22 @@ class SmartOrganizerEngine:
         
         self.log(f"📦 加载 {len(memory)} 条学习数据到索引...")
         vectors = []
-        valid_memory = []
+        failed_count = 0
         for item in memory:
             vec = self.encode(item["text"])
             if vec is not None:
                 vectors.append(vec)
-                valid_memory.append(item)
+            else:
+                failed_count += 1
+                self.log(f"⚠ 跳过编码失败的条目: {item.get('text', '')[:30]}...")
         
         if vectors:
             self.index.reset()
             self.index.add(np.array(vectors).astype("float32"))
-            self.log(f"✔ 索引加载完成: {len(vectors)} 条数据")
+            self.log(f"✔ 索引加载完成: {len(vectors)}/{len(memory)} 条")
         
-        if len(valid_memory) != len(memory):
-            self.db_manager.memory = valid_memory
-            self.db_manager.save_learning_data()
+        if failed_count > 0:
+            self.log(f"⚠ {failed_count} 条数据编码失败（已跳过，不删除原始数据）")
     
     def log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -752,21 +786,30 @@ class SmartOrganizerEngine:
                 self.log(f"ℹ️ 映射已存在: {text} -> {path}")
                 return
         
-        if len(self.db_manager.memory) >= MAX_LEARNING_ITEMS:
-            self.db_manager.memory.pop(0)
-            self.index.reset()
-            if self.db_manager.memory:
-                vectors = [self.encode(item["text"]) for item in self.db_manager.memory 
-                          if self.encode(item["text"]) is not None]
-                if vectors:
-                    self.index.add(np.array(vectors).astype("float32"))
-        
-        self.index.add(vec.reshape(1, -1))
-        self.db_manager.memory.append({
+        new_item = {
             "text": text, 
             "path": path, 
             "learned_at": datetime.now().isoformat()
-        })
+        }
+        
+        if len(self.db_manager.memory) >= MAX_LEARNING_ITEMS:
+            # 移除最旧的条目
+            self.db_manager.memory.pop(0)
+            # 全量重建索引（包含新向量，一次完成）
+            all_items = self.db_manager.memory + [new_item]
+            self.index.reset()
+            vectors = []
+            for item in all_items:
+                v = self.encode(item["text"])
+                if v is not None:
+                    vectors.append(v)
+            if vectors:
+                self.index.add(np.array(vectors).astype("float32"))
+        else:
+            # 未满容量，直接添加新向量
+            self.index.add(vec.reshape(1, -1))
+        
+        self.db_manager.memory.append(new_item)
         self.db_manager.save_learning_data()
         self.log(f"📝 已学习: {text} -> {path}")
     
@@ -790,7 +833,7 @@ class SmartOrganizerEngine:
             with self.processed_lock:
                 if file_key in self.processed_files:
                     return True
-        except:
+        except Exception:
             pass
         return False
     
@@ -803,7 +846,7 @@ class SmartOrganizerEngine:
                 self.processed_files.add(file_key)
                 if len(self.processed_files) > 5000:
                     self.processed_files = set(list(self.processed_files)[-4000:])
-        except:
+        except Exception:
             pass
     
     def process_file(self, path, force=False):
@@ -828,7 +871,7 @@ class SmartOrganizerEngine:
             if file_size > 2 * 1024 * 1024 * 1024:
                 self.log(f"⚠ 文件过大，跳过: {filename}")
                 return 'skipped'
-        except:
+        except Exception:
             pass
         
         is_duplicate, target_path, dup_info = self.deduplicator.check_and_handle_duplicate(
@@ -995,7 +1038,7 @@ class SmartOrganizerEngine:
                 for f in files:
                     try:
                         total += os.path.getsize(os.path.join(root, f))
-                    except:
+                    except Exception:
                         pass
         return total
     
@@ -1362,9 +1405,10 @@ class TrainingSystemGUI:
         
         threading.Thread(target=scan_thread, daemon=True).start()
     
-    def _update_scan_progress(self, count, status):
-        self.window.after(0, lambda: self.progress_label.config(text=f"{status}: {count} 个文件"))
-        self.window.after(0, lambda: self.progress_var.set(min(count % 100, 100)))
+    def _update_scan_progress(self, current, total, status):
+        self.window.after(0, lambda: self.progress_label.config(text=f"{status}: {current} 个文件"))
+        progress = min((current / max(total, 1)) * 100, 100)
+        self.window.after(0, lambda: self.progress_var.set(progress))
     
     def _start_training(self):
         if not self.training_engine or not self.scanned_data:
@@ -1973,8 +2017,8 @@ class SmartOrganizerApp:
         text += f"学习数据: {db_stats.get('total_learnings', 0)} 条\n"
         text += f"重复记录: {db_stats.get('total_duplicates', 0)} 条\n"
         text += f"哈希缓存: {db_stats.get('hash_cache_size', 0)} 个\n"
-        text += f"创建时间: {db_stats.get('created_at', 'unknown')[:10]}\n"
-        text += f"最后更新: {db_stats.get('last_updated', 'unknown')[:10]}\n\n"
+        text += f"创建时间: {str(db_stats.get('created_at', '') or '')[:10] or 'unknown'}\n"
+        text += f"最后更新: {str(db_stats.get('last_updated', '') or '')[:10] or 'unknown'}\n\n"
         
         text += "📁 文件夹信息\n" + "-" * 40 + "\n"
         text += f"未分类文件夹大小: {self._format_size(stats.get('unknown_folder_size', 0))}\n"

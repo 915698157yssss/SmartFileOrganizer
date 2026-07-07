@@ -1,0 +1,20 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python source
+*.py text diff=python
+
+# Batch files (keep CRLF on Windows)
+*.bat text eol=crlf
+
+# Markdown/Text
+*.md text
+*.txt text
+
+# Images
+*.png binary
+*.ico binary
+
+# Line endings
+.gitignore text
+LICENSE text

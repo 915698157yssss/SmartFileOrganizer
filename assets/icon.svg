@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="30" fill="#2d3436" stroke="#636e72" stroke-width="2"/>
+  
+  <!-- Folder icon -->
+  <path d="M12 22 L12 48 L52 48 L52 24 L30 24 L26 18 L12 18 Z" 
+        fill="#fdcb6e" stroke="#e17055" stroke-width="1.5" stroke-linejoin="round"/>
+  
+  <!-- File icon inside -->
+  <rect x="24" y="30" width="16" height="20" rx="2" fill="#dfe6e9" stroke="#b2bec3" stroke-width="1"/>
+  <line x1="28" y1="36" x2="36" y2="36" stroke="#b2bec3" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="28" y1="40" x2="36" y2="40" stroke="#b2bec3" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="28" y1="44" x2="33" y2="44" stroke="#b2bec3" stroke-width="1.5" stroke-linecap="round"/>
+  
+  <!-- Raccoon face overlay (small) -->
+  <circle cx="44" cy="20" r="10" fill="#636e72"/>
+  <circle cx="40" cy="18" r="3" fill="#2d3436"/>
+  <circle cx="48" cy="18" r="3" fill="#2d3436"/>
+  <circle cx="40" cy="17" r="1.5" fill="white"/>
+  <circle cx="48" cy="17" r="1.5" fill="white"/>
+  <path d="M42 23 Q44 25 46 23" stroke="#2d3436" stroke-width="1" fill="none"/>
+</svg>
