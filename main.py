@@ -1,12 +1,18 @@
 """
 Smart Organizer v3-lite - 优化版
-修复：循环处理自身日志文件的问题
-优化：未分类文件夹移至同级目录
-新增：新文件进入时主动询问分类
-新增：系统目录树导航，可视化选择分类路径
+文件结构：
+├── 待分类文件/              # 监听目录（只放待分类文件）
+├── 未分类文件/              # 同级目录（跳过的文件）
+├── .smart_organizer/        # 程序文件目录（隐藏文件夹）
+│   ├── vector_db.json       # 学习数据库
+│   ├── file_log.txt         # 操作日志
+│   └── config.json          # 配置文件
+├── smart_organizer_gui.py   # 程序主文件
+└── SmartOrganizer.exe       # 打包后的可执行文件
 """
 
 import os
+import sys
 import time
 import shutil
 import json
@@ -25,6 +31,42 @@ from datetime import datetime
 DEFAULT_WATCH_FOLDER = r"F:\SmartFileOrganizer\待分类文件"
 DEFAULT_BASE_TARGET = r"G:\（2026.6.5备份）眉山苏伊士污水处理有限公司"
 
+# ==================== 路径管理 ====================
+def get_app_data_folder():
+    """获取程序数据文件夹路径（与待分类目录同级）"""
+    # 获取当前脚本所在目录
+    if getattr(sys, 'frozen', False):
+        # 打包成exe后的路径
+        script_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发环境路径
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 在脚本目录下创建 .smart_organizer 文件夹
+    data_folder = os.path.join(script_dir, ".smart_organizer")
+    os.makedirs(data_folder, exist_ok=True)
+    return data_folder
+
+def get_db_file(watch_folder):
+    """获取数据库文件路径（基于监听目录生成唯一名称）"""
+    data_folder = get_app_data_folder()
+    # 使用监听目录的路径哈希作为文件名的一部分，避免不同目录冲突
+    import hashlib
+    folder_hash = hashlib.md5(watch_folder.encode()).hexdigest()[:8]
+    return os.path.join(data_folder, f"vector_db_{folder_hash}.json")
+
+def get_log_file(watch_folder):
+    """获取日志文件路径"""
+    data_folder = get_app_data_folder()
+    import hashlib
+    folder_hash = hashlib.md5(watch_folder.encode()).hexdigest()[:8]
+    return os.path.join(data_folder, f"file_log_{folder_hash}.txt")
+
+def get_unknown_folder(watch_folder):
+    """获取未分类文件夹路径（与监听目录同级）"""
+    parent_folder = os.path.dirname(watch_folder)
+    return os.path.join(parent_folder, "未分类文件")
+
 # ==================== 核心逻辑类 ====================
 class SmartOrganizerEngine:
     """文件分类引擎"""
@@ -34,12 +76,11 @@ class SmartOrganizerEngine:
         self.base_target = base_target
         
         # 未分类文件夹放在监听目录的**同级目录**
-        parent_folder = os.path.dirname(watch_folder)
-        self.unknown_folder = os.path.join(parent_folder, "未分类文件")
+        self.unknown_folder = get_unknown_folder(watch_folder)
         
-        # 日志文件也放在同级目录
-        self.log_file = os.path.join(parent_folder, "file_log.txt")
-        self.db_file = os.path.join(watch_folder, "vector_db.json")
+        # 数据库和日志文件放在程序数据目录
+        self.db_file = get_db_file(watch_folder)
+        self.log_file = get_log_file(watch_folder)
         
         self.log_callback = log_callback
         self.model = None
@@ -53,9 +94,6 @@ class SmartOrganizerEngine:
         # 记录已处理的文件，避免重复处理
         self.processed_files = set()
         self.processed_lock = threading.Lock()
-        
-        # 待用户交互的文件队列
-        self.waiting_for_response = False
         
         # 初始化模型
         self._init_model()
@@ -128,6 +166,8 @@ class SmartOrganizerEngine:
     
     def save_db(self):
         """保存学习数据库"""
+        # 确保目录存在
+        os.makedirs(os.path.dirname(self.db_file), exist_ok=True)
         with open(self.db_file, "w", encoding="utf-8") as f:
             json.dump(self.memory, f, ensure_ascii=False, indent=2)
     
@@ -179,11 +219,11 @@ class SmartOrganizerEngine:
         if filename.startswith("已处理_"):
             return True
         
-        # 跳过程序自身的文件
-        if filepath == self.log_file:
+        # 跳过程序自身的文件（数据库和日志）
+        if filepath == self.db_file:
             return True
         
-        if filepath == self.db_file:
+        if filepath == self.log_file:
             return True
         
         # 跳过未分类目录中的文件（避免二次处理）
@@ -296,6 +336,7 @@ class SmartOrganizerEngine:
     def _write_log(self, msg):
         """写入日志文件"""
         try:
+            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
             with open(self.log_file, "a", encoding="utf-8") as f:
                 f.write(f"{datetime.now()} - {msg}\n")
         except:
@@ -324,9 +365,12 @@ class SmartOrganizerEngine:
         
         self.is_running = True
         os.makedirs(self.unknown_folder, exist_ok=True)
+        os.makedirs(os.path.dirname(self.db_file), exist_ok=True)
         
         self.log("🚀 启动文件监听器...")
+        self.log(f"📁 监听目录: {self.watch_folder}")
         self.log(f"📁 未分类文件夹: {self.unknown_folder}")
+        self.log(f"📁 数据库文件: {self.db_file}")
         self.log(f"📁 日志文件: {self.log_file}")
         
         self.observer = Observer()
@@ -404,7 +448,7 @@ class FolderTreeDialog:
         
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"选择分类目录 - {filename}")
-        self.dialog.geometry("600x450")
+        self.dialog.geometry("650x500")
         self.dialog.transient(parent)
         self.dialog.grab_set()
         
@@ -413,8 +457,8 @@ class FolderTreeDialog:
         
         # 居中显示
         self.dialog.update_idletasks()
-        x = (self.dialog.winfo_screenwidth() - 600) // 2
-        y = (self.dialog.winfo_screenheight() - 450) // 2
+        x = (self.dialog.winfo_screenwidth() - 650) // 2
+        y = (self.dialog.winfo_screenheight() - 500) // 2
         self.dialog.geometry(f"+{x}+{y}")
     
     def _create_widgets(self):
@@ -425,7 +469,7 @@ class FolderTreeDialog:
         
         ttk.Label(info_frame, text=f"📄 为文件选择目标目录: {self.filename}", 
                   font=("", 10, "bold")).pack(anchor=tk.W)
-        ttk.Label(info_frame, text="双击文件夹进入子目录，点击「选择此目录」确认", 
+        ttk.Label(info_frame, text="双击文件夹进入子目录，点击按钮确认选择", 
                   foreground="gray").pack(anchor=tk.W)
         
         # 当前路径显示
@@ -455,14 +499,20 @@ class FolderTreeDialog:
         btn_frame = ttk.Frame(self.dialog, padding="10")
         btn_frame.pack(fill=tk.X)
         
-        # 向上按钮
-        ttk.Button(btn_frame, text="📁 上级目录", command=self._go_up).pack(side=tk.LEFT, padx=2)
+        # 左侧按钮组
+        left_btn_frame = ttk.Frame(btn_frame)
+        left_btn_frame.pack(side=tk.LEFT)
         
-        ttk.Button(btn_frame, text="📂 选择此目录", command=self._confirm).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="📂 选择此目录并学习", command=self._confirm_and_learn).pack(side=tk.LEFT, padx=2)
+        ttk.Button(left_btn_frame, text="📁 上级目录", command=self._go_up).pack(side=tk.LEFT, padx=2)
+        ttk.Button(left_btn_frame, text="📂 选择此目录", command=self._confirm).pack(side=tk.LEFT, padx=2)
+        ttk.Button(left_btn_frame, text="📂 选择并学习", command=self._confirm_and_learn).pack(side=tk.LEFT, padx=2)
         
-        ttk.Button(btn_frame, text="⏭️ 跳过（移至未分类）", command=self._skip).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="取消", command=self._cancel).pack(side=tk.RIGHT, padx=2)
+        # 右侧按钮组
+        right_btn_frame = ttk.Frame(btn_frame)
+        right_btn_frame.pack(side=tk.RIGHT)
+        
+        ttk.Button(right_btn_frame, text="⏭️ 跳过", command=self._skip).pack(side=tk.LEFT, padx=2)
+        ttk.Button(right_btn_frame, text="取消", command=self._cancel).pack(side=tk.LEFT, padx=2)
     
     def _load_tree(self, path=None):
         """加载目录树"""
@@ -487,21 +537,16 @@ class FolderTreeDialog:
             # 添加到树
             for name, full_path in items:
                 # 检查是否有子目录
-                has_children = False
                 try:
+                    has_children = False
                     for sub in os.listdir(full_path):
                         if os.path.isdir(os.path.join(full_path, sub)) and not sub.startswith("."):
                             has_children = True
                             break
                 except:
-                    pass
+                    has_children = False
                 
-                # 计算相对于基础路径的显示路径
-                display_path = full_path.replace(self.base_path, "").strip("\\/")
-                if not display_path:
-                    display_path = name
-                
-                self.tree.insert("", "end", text=name, values=(full_path, display_path), 
+                self.tree.insert("", "end", text=name, values=(full_path,), 
                                open=False)
             
             # 更新当前路径显示
@@ -542,7 +587,7 @@ class FolderTreeDialog:
             self.result = "confirm"
             self.dialog.destroy()
         else:
-            messagebox.showwarning("提示", "请选择一个目录")
+            messagebox.showwarning("提示", "请先点击选择一个目录")
     
     def _confirm_and_learn(self):
         """确认选择当前目录并学习"""
@@ -554,7 +599,7 @@ class FolderTreeDialog:
             self.result = "learn"
             self.dialog.destroy()
         else:
-            messagebox.showwarning("提示", "请选择一个目录")
+            messagebox.showwarning("提示", "请先点击选择一个目录")
     
     def _skip(self):
         """跳过"""
@@ -590,10 +635,14 @@ class SmartOrganizerApp:
         self.watch_entry.insert(0, DEFAULT_WATCH_FOLDER)
         self.target_entry.insert(0, DEFAULT_BASE_TARGET)
         
-        # 更新日志
-        self.log("👋 欢迎使用智能文件分类器")
-        self.log("📌 新文件进入待分类目录时会询问您如何分类")
-        self.log("📌 点击「📂 浏览目录」可通过树形目录选择分类路径")
+        # 显示数据文件夹位置
+        data_folder = get_app_data_folder()
+        self.log(f"👋 欢迎使用智能文件分类器")
+        self.log(f"📁 程序数据目录: {data_folder}")
+        self.log(f"📌 数据库和日志将保存在数据目录中")
+        self.log(f"📌 新文件进入待分类目录时会询问您如何分类")
+        self.log(f"📌 点击「📂 浏览目录」可通过树形目录选择分类路径")
+        self.log(f"📌 也可在输入框中手动输入分类路径")
         self.log("请检查配置路径，然后点击「启动服务」")
     
     def _create_widgets(self):
@@ -608,17 +657,19 @@ class SmartOrganizerApp:
         
         # 监听目录
         ttk.Label(config_frame, text="监听目录:").grid(row=0, column=0, sticky=tk.W, pady=2)
-        self.watch_entry = ttk.Entry(config_frame, width=50)
+        self.watch_entry = ttk.Entry(config_frame, width=45)
         self.watch_entry.grid(row=0, column=1, padx=(5, 5), pady=2)
         ttk.Button(config_frame, text="浏览", command=self._browse_watch).grid(row=0, column=2, pady=2)
-        ttk.Label(config_frame, text="💡 未分类文件夹自动创建在监听目录的同级", 
+        ttk.Label(config_frame, text="💡 未分类文件夹创建在同级目录", 
                  foreground="gray").grid(row=0, column=3, padx=(10, 0), pady=2)
         
         # 目标目录
         ttk.Label(config_frame, text="目标目录:").grid(row=1, column=0, sticky=tk.W, pady=2)
-        self.target_entry = ttk.Entry(config_frame, width=50)
+        self.target_entry = ttk.Entry(config_frame, width=45)
         self.target_entry.grid(row=1, column=1, padx=(5, 5), pady=2)
         ttk.Button(config_frame, text="浏览", command=self._browse_target).grid(row=1, column=2, pady=2)
+        ttk.Label(config_frame, text="💡 分类后的文件存放根目录", 
+                 foreground="gray").grid(row=1, column=3, padx=(10, 0), pady=2)
         
         # 控制按钮区域
         control_frame = ttk.Frame(config_frame)
@@ -653,7 +704,7 @@ class SmartOrganizerApp:
         manual_frame.pack(fill=tk.X, pady=(5, 0))
         
         ttk.Label(manual_frame, text="自定义分类路径:").pack(side=tk.LEFT)
-        self.manual_entry = ttk.Entry(manual_frame, width=40)
+        self.manual_entry = ttk.Entry(manual_frame, width=45)
         self.manual_entry.pack(side=tk.LEFT, padx=5)
         self.manual_entry.bind("<Return>", lambda e: self._manual_confirm())
         
@@ -664,7 +715,7 @@ class SmartOrganizerApp:
         ttk.Button(manual_frame, text="⏭️ 跳过（移至未分类）", command=self._skip_file).pack(side=tk.LEFT, padx=2)
         
         # 提示标签
-        self.hint_label = ttk.Label(interact_frame, text="💡 选择建议路径，或点击「浏览目录」从树形目录选择", 
+        self.hint_label = ttk.Label(interact_frame, text="💡 选择建议路径，或点击「浏览目录」从树形目录选择，也可手动输入", 
                                    foreground="gray")
         self.hint_label.pack(anchor=tk.W, pady=(5, 0))
         
@@ -819,13 +870,13 @@ class SmartOrganizerApp:
                 text=f"📄 新文件: {filename}  —  请选择分类方式",
                 foreground="blue"
             )
-            self.hint_label.config(text="💡 点击建议按钮，或点击「浏览目录」从树形目录选择")
+            self.hint_label.config(text="💡 点击建议按钮，或点击「浏览目录」从树形目录选择，也可手动输入")
         else:
             self.interact_label.config(
                 text=f"📄 新文件: {filename}  —  暂无匹配建议，请手动选择",
                 foreground="orange"
             )
-            self.hint_label.config(text="💡 暂无相似历史记录，点击「浏览目录」选择分类路径")
+            self.hint_label.config(text="💡 暂无相似历史记录，点击「浏览目录」选择分类路径，或手动输入")
         
         # 清除旧按钮
         for btn in self.suggest_buttons:
@@ -887,14 +938,19 @@ class SmartOrganizerApp:
                     self._manual_confirm()
                 else:
                     self.log(f"📝 用户从目录树选择: {filename} -> {selected_path}")
+                    # 不自动确认，让用户手动点击「确认分类」
+                    self.status_var.set(f"已选择路径: {selected_path}，请点击「确认分类」")
         elif dialog.result == "skip":
             self._skip_file()
+        elif dialog.result == "cancel":
+            self.log(f"📝 用户取消目录选择")
     
     def _suggest_confirm(self, idx):
         """确认建议"""
         if self.current_file and self.engine:
             filename = self.current_file["filename"]
-            self.log(f"📝 用户选择建议: {filename} -> {self.current_file['suggestions'][idx][0]}")
+            target = self.current_file['suggestions'][idx][0]
+            self.log(f"📝 用户选择建议: {filename} -> {target}")
             self.engine.handle_user_choice(
                 self.current_file["filename"],
                 self.current_file["path"],
@@ -939,7 +995,7 @@ class SmartOrganizerApp:
         """清理交互状态"""
         self.current_file = None
         self.interact_label.config(text="等待文件...", foreground="black")
-        self.hint_label.config(text="💡 选择建议路径，或点击「浏览目录」从树形目录选择")
+        self.hint_label.config(text="💡 选择建议路径，或点击「浏览目录」从树形目录选择，也可手动输入")
         self._set_interact_enabled(False)
         self.status_var.set("运行中")
         
