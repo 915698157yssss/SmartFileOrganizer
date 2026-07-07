@@ -1,11 +1,5 @@
 """
-智能文件分类器 v6 - 完整整合版
-整合功能：
-1. 主程序：文件监听、自动分类、手动确认
-2. 训练系统：扫描目标文件夹、训练学习模型
-3. 独立数据库：学习数据独立存储和管理
-4. 文件去重：自动检测并处理重复文件
-5. 目录树选择：可视化选择分类路径
+智能文件分类器 v6 - 完整整合版（带返回按钮）
 """
 
 import os
@@ -1207,9 +1201,10 @@ class EnhancedFolderTreeDialog:
 
 # ==================== 训练系统GUI ====================
 class TrainingSystemGUI:
-    def __init__(self, parent, db_manager):
+    def __init__(self, parent, db_manager, on_close_callback=None):
         self.parent = parent
         self.db_manager = db_manager
+        self.on_close_callback = on_close_callback
         self.training_engine = None
         self.scanned_data = None
         
@@ -1220,10 +1215,24 @@ class TrainingSystemGUI:
         self.window.title("学习数据库训练系统")
         self.window.geometry("900x700")
         self.window.transient(self.parent)
+        self.window.protocol("WM_DELETE_WINDOW", self._on_close)
         
         main_frame = ttk.Frame(self.window, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
+        # 顶部：返回按钮
+        top_frame = ttk.Frame(main_frame)
+        top_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Button(top_frame, text="🏠 返回主程序", 
+                  command=self._on_close).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(top_frame, text="学习数据库训练系统", 
+                 font=("", 12, "bold")).pack(side=tk.LEFT, padx=20)
+        
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        
+        # 配置区域
         config_frame = ttk.LabelFrame(main_frame, text="训练配置", padding="10")
         config_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -1277,6 +1286,12 @@ class TrainingSystemGUI:
         status_frame.pack(fill=tk.X, pady=(5, 0))
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(status_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W).pack(fill=tk.X)
+    
+    def _on_close(self):
+        """关闭窗口时回调"""
+        if self.on_close_callback:
+            self.on_close_callback()
+        self.window.destroy()
     
     def _browse_target(self):
         path = filedialog.askdirectory(title="选择目标文件夹（包含已分类文件）")
@@ -1807,10 +1822,19 @@ class SmartOrganizerApp:
         self.manual_entry.delete(0, tk.END)
     
     def _open_training_system(self):
+        """打开训练系统窗口"""
         if self.training_window and self.training_window.winfo_exists():
             self.training_window.lift()
             return
-        self.training_window = TrainingSystemGUI(self.root, self.db_manager)
+        
+        def on_training_close():
+            self.training_window = None
+        
+        self.training_window = TrainingSystemGUI(
+            self.root, 
+            self.db_manager,
+            on_close_callback=on_training_close
+        )
     
     def _process_existing(self):
         if not self.engine or not self.is_running:
