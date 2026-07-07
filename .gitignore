@@ -10,8 +10,13 @@ build/
 
 # 数据 & 配置
 smart_organizer_data/
+smart_organizer/
 *.db
 *.json
+file_log.txt
+
+# 下载的依赖包（太大，不适合 git）
+packages/
 
 # 环境
 venv/
