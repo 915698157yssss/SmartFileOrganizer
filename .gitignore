@@ -1,0 +1,22 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.spec
+
+# 数据 & 配置
+smart_organizer_data/
+*.db
+*.json
+
+# 环境
+venv/
+.env
+
+# 系统
+Thumbs.db
+.DS_Store
