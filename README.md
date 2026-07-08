@@ -33,7 +33,7 @@ python main.py
 
 ```
 SmartFileOrganizer/
-├── main.py               # 主程序 (v6.1)
+├── main.py               # 主程序 (v6.2)
 ├── requirements.txt      # Python 依赖
 ├── LICENSE               # MIT 开源协议
 ├── scripts/              # 构建 & 工具脚本
@@ -53,6 +53,7 @@ SmartFileOrganizer/
 | v5.0 | 新增训练系统和数据库管理 |
 | v6.0 | 重构架构，分离数据库管理器 |
 | v6.1 | 优化路径配置，修复 Bug |
+| v6.2 | 修复索引双加 Bug、O(n²) 查重、虚假进度条；打包体积优化 (UPX + 依赖裁剪) |
 
 ## 📄 开源协议
 

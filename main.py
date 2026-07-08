@@ -1,5 +1,5 @@
 """
-智能文件分类器 v6 - 完整整合版（带返回按钮）
+智能文件分类器 v6.2 - 完整整合版（带返回按钮）
 """
 
 import os
@@ -34,7 +34,7 @@ DUPLICATE_CHECK_EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', 
 class DatabaseManager:
     """独立数据库管理器 - 负责所有数据的存储、读取、备份和迁移"""
     
-    DB_VERSION = "6.0"
+    DB_VERSION = "6.2"
     
     def __init__(self, base_path=None):
         if base_path is None:
@@ -197,20 +197,18 @@ class DatabaseManager:
     
     def load_hash_cache(self):
         if os.path.exists(self.hash_db_file):
-            try:
-                with open(self.hash_db_file, 'r', encoding='utf-8') as f:
-                    self.hash_cache = json.load(f)
-            except UnicodeDecodeError:
+            for enc in ['utf-8', 'gbk', 'gb2312', 'cp1252']:
                 try:
-                    with open(self.hash_db_file, 'r', encoding='gbk') as f:
+                    with open(self.hash_db_file, 'r', encoding=enc) as f:
                         self.hash_cache = json.load(f)
+                    break
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    print(f"尝试编码 {enc} 加载哈希缓存失败: {e}")
+                    self.hash_cache = {}
                 except Exception as e:
                     print(f"加载哈希缓存失败: {e}")
                     self.hash_cache = {}
-            except Exception as e:
-                print(f"加载哈希缓存失败: {e}")
-                self.hash_cache = {}
-                self.hash_cache = {}
+                    break
         else:
             self.hash_cache = {}
     
@@ -223,20 +221,18 @@ class DatabaseManager:
     
     def load_duplicate_log(self):
         if os.path.exists(self.duplicate_log_file):
-            try:
-                with open(self.duplicate_log_file, 'r', encoding='utf-8') as f:
-                    self.duplicate_log = json.load(f)
-            except UnicodeDecodeError:
+            for enc in ['utf-8', 'gbk', 'gb2312', 'cp1252']:
                 try:
-                    with open(self.duplicate_log_file, 'r', encoding='gbk') as f:
+                    with open(self.duplicate_log_file, 'r', encoding=enc) as f:
                         self.duplicate_log = json.load(f)
+                    break
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    print(f"尝试编码 {enc} 加载重复日志失败: {e}")
+                    self.duplicate_log = []
                 except Exception as e:
                     print(f"加载重复日志失败: {e}")
                     self.duplicate_log = []
-            except Exception as e:
-                print(f"加载重复日志失败: {e}")
-                self.duplicate_log = []
-                self.duplicate_log = []
+                    break
         else:
             self.duplicate_log = []
     
@@ -533,14 +529,17 @@ class TrainingEngine:
         new_items = 0
         duplicate_items = 0
         
+        # 构建 O(1) 查重集合
+        existing_set = set()
+        for item in self.db_manager.memory:
+            existing_set.add((item['text'], item['path']))
+        
         for i, item in enumerate(learning_data):
             text = item['text']
             path = item['path']
+            key = (text, path)
             
-            exists = any(existing['text'] == text and existing['path'] == path 
-                        for existing in self.db_manager.memory)
-            
-            if exists:
+            if key in existing_set:
                 duplicate_items += 1
                 self.statistics['duplicates_found'] += 1
             else:
@@ -552,6 +551,7 @@ class TrainingEngine:
                     'source_path': item.get('full_path', ''),
                     'extension': item.get('extension', '')
                 })
+                existing_set.add(key)
                 new_items += 1
                 self.statistics['trained_items'] += 1
             
@@ -714,20 +714,19 @@ class SmartOrganizerEngine:
         
         self.log(f"📦 加载 {len(memory)} 条学习数据到索引...")
         vectors = []
-        failed_count = 0
         for item in memory:
             vec = self.encode(item["text"])
             if vec is not None:
                 vectors.append(vec)
             else:
-                failed_count += 1
-                self.log(f"⚠ 跳过编码失败的条目: {item.get('text', '')[:30]}...")
+                self.log(f"⚠ 跳过编码失败的条目: {item.get('text', '')[:30]}...（保留原始数据不删除）")
         
         if vectors:
             self.index.reset()
             self.index.add(np.array(vectors).astype("float32"))
             self.log(f"✔ 索引加载完成: {len(vectors)}/{len(memory)} 条")
         
+        failed_count = len(memory) - len(vectors)
         if failed_count > 0:
             self.log(f"⚠ {failed_count} 条数据编码失败（已跳过，不删除原始数据）")
     
@@ -777,10 +776,7 @@ class SmartOrganizerEngine:
         if not text or not path:
             return
         
-        vec = self.encode(text)
-        if vec is None:
-            return
-        
+        # 先检查是否已存在
         for item in self.db_manager.memory:
             if item["text"] == text and item["path"] == path:
                 self.log(f"ℹ️ 映射已存在: {text} -> {path}")
@@ -793,23 +789,21 @@ class SmartOrganizerEngine:
         }
         
         if len(self.db_manager.memory) >= MAX_LEARNING_ITEMS:
-            # 移除最旧的条目
+            # 移除最旧条目，然后追加新条目
             self.db_manager.memory.pop(0)
-            # 全量重建索引（包含新向量，一次完成）
-            all_items = self.db_manager.memory + [new_item]
-            self.index.reset()
-            vectors = []
-            for item in all_items:
-                v = self.encode(item["text"])
-                if v is not None:
-                    vectors.append(v)
-            if vectors:
-                self.index.add(np.array(vectors).astype("float32"))
-        else:
-            # 未满容量，直接添加新向量
-            self.index.add(vec.reshape(1, -1))
         
         self.db_manager.memory.append(new_item)
+        
+        # 全量重建索引（一次性完成，避免双加向量）
+        self.index.reset()
+        vectors = []
+        for item in self.db_manager.memory:
+            v = self.encode(item["text"])
+            if v is not None:
+                vectors.append(v)
+        if vectors:
+            self.index.add(np.array(vectors).astype("float32"))
+        
         self.db_manager.save_learning_data()
         self.log(f"📝 已学习: {text} -> {path}")
     
@@ -2017,8 +2011,10 @@ class SmartOrganizerApp:
         text += f"学习数据: {db_stats.get('total_learnings', 0)} 条\n"
         text += f"重复记录: {db_stats.get('total_duplicates', 0)} 条\n"
         text += f"哈希缓存: {db_stats.get('hash_cache_size', 0)} 个\n"
-        text += f"创建时间: {str(db_stats.get('created_at', '') or '')[:10] or 'unknown'}\n"
-        text += f"最后更新: {str(db_stats.get('last_updated', '') or '')[:10] or 'unknown'}\n\n"
+        created = db_stats.get('created_at')
+        text += f"创建时间: {str(created)[:10] if created else 'unknown'}\n"
+        updated = db_stats.get('last_updated')
+        text += f"最后更新: {str(updated)[:10] if updated else 'unknown'}\n\n"
         
         text += "📁 文件夹信息\n" + "-" * 40 + "\n"
         text += f"未分类文件夹大小: {self._format_size(stats.get('unknown_folder_size', 0))}\n"
