@@ -55,7 +55,7 @@ if %errorlevel% equ 0 (
 echo.
 
 echo [3/3] 清理旧版本文件...
-echo 保留: main.py (v6.1 最新版本)
+echo 保留: main.py (v6.2 最新版本)
 echo 删除旧版本源文件...
 del /q F:\SmartFileOrganizer\smart_organizer_gui*.py 2>nul
 del /q F:\SmartFileOrganizer\smart_organizer_v3lite*.py 2>nul
@@ -71,10 +71,10 @@ echo   GitHub 仓库（私密）:
 echo   https://github.com/915698157yssss/SmartFileOrganizer
 echo.
 echo   本地保留文件:
-echo   F:\SmartFileOrganizer\main.py  ← v6.1 最新版本
+echo   F:\SmartFileOrganizer\main.py  ← v6.2 最新版本
 echo.
 echo   版本历史 (7个版本):
-echo     v1.0 → v2.0 → v3.0 → v4.0 → v5.0 → v6.0 → v6.1
+echo     v1.0 → v2.0 → v3.0 → v4.0 → v5.0 → v6.0 → v6.1 → v6.2
 echo.
 echo   用 git log 查看完整历史：
 echo     cd F:\SmartFileOrganizer ^&^& git log --oneline

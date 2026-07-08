@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title 构建智能文件分类器 - 打包脚本
+title 构建智能文件分类器 - 打包脚本 v6.2
 
 echo ================================================
-echo   智能文件分类器 v6 - 应用打包
+echo   智能文件分类器 v6.2 - 应用打包（优化版）
 echo ================================================
 echo.
 
@@ -47,12 +47,16 @@ print('代码已修改，已保存到 ' + r'%BUILD_DIR%\SmartFileOrganizer.py')
 echo ✔ 代码修改完成
 echo.
 
-echo [3/4] 使用 PyInstaller 打包...
+echo [3/4] 使用 PyInstaller 打包（优化版）...
 cd /d "%BUILD_DIR%"
+
+set UPX_DIR=%PROJECT_DIR%\scripts\upx\upx-4.2.4-win64
 
 pyinstaller --onedir ^
     --name "%APP_NAME%" ^
     --windowed ^
+    --upx-dir "%UPX_DIR%" ^
+    --upx-exclude "*.vmp.exe" ^
     --add-data "model;model" ^
     --add-data "model\1_Pooling\config.json;model\1_Pooling" ^
     --add-data "model\config.json;model" ^
@@ -69,9 +73,22 @@ pyinstaller --onedir ^
     --hidden-import watchdog ^
     --hidden-import tkinter ^
     --hidden-import PIL ^
-    --collect-all sentence_transformers ^
-    --collect-all transformers ^
-    --collect-all huggingface_hub ^
+    --hidden-import numpy.core.multiarray ^
+    --hidden-import numpy.core._methods ^
+    --hidden-import transformers ^
+    --hidden-import transformers.models.bert ^
+    --hidden-import transformers.models.bert.configuration_bert ^
+    --hidden-import transformers.models.bert.modeling_bert ^
+    --hidden-import transformers.models.auto ^
+    --hidden-import transformers.models.auto.configuration_auto ^
+    --hidden-import transformers.models.auto.modeling_auto ^
+    --hidden-import transformers.models.auto.feature_extraction_auto ^
+    --hidden-import transformers.models.auto.tokenization_auto ^
+    --hidden-import transformers.models.auto.processing_auto ^
+    --exclude-module huggingface_hub ^
+    --exclude-module torch.testing ^
+    --exclude-module torch.distributions ^
+    --exclude-module torch.onnx ^
     --clean ^
     SmartFileOrganizer.py
 
@@ -87,6 +104,13 @@ if exist "%BUILD_DIR%\dist\%APP_NAME%\%APP_NAME%.exe" (
 
 echo.
 echo [4/4] 整理输出目录...
+:: UPX 后压缩 DLL
+echo 应用 UPX 压缩 DLL...
+"%UPX_DIR%\upx.exe" --best --lzma "%BUILD_DIR%\dist\%APP_NAME%\*.dll" 2>nul
+if exist "%BUILD_DIR%\dist\%APP_NAME%\torch\lib\*.dll" (
+    "%UPX_DIR%\upx.exe" --best --lzma "%BUILD_DIR%\dist\%APP_NAME%\torch\lib\*.dll" 2>nul
+)
+
 :: 复制到项目 dist 目录
 if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
 mkdir "%DIST_DIR%"
@@ -100,6 +124,7 @@ echo ================================================
 echo.
 echo 输出位置: %DIST_DIR%\%APP_NAME%\
 echo 运行方式: 双击 %APP_NAME%.exe
+echo 版本: v6.2（优化版 - 精简依赖 + UPX 压缩）
 echo 总大小: 
 dir /S "%DIST_DIR%\%APP_NAME%" | findstr "File(s)"
 echo.
