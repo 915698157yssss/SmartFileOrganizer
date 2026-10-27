@@ -1,5 +1,12 @@
-# 智能文件分类器 v6 依赖
-sentence-transformers>=2.2.0
-faiss-cpu>=1.7.0
-watchdog>=3.0.0
-numpy>=1.24.0
+# 核心运行时不需要任何第三方包。
+#
+# 下面这些是「正文抽取」增强，装上后能读 Office / PDF 内容；
+# 不装也能运行，程序会自动降级为只使用文件名。
+python-docx>=1.1.0
+openpyxl>=3.1.0
+python-pptx>=0.6.23
+pypdf>=4.0.0
+
+# 可选：更强的语义模型后端（体积大，默认不启用）
+# 设置 config.json 中 "model_backend": "st" 后再安装：
+# sentence-transformers>=2.2.0

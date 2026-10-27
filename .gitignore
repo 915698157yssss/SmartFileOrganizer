@@ -1,30 +1,21 @@
-﻿# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
-dist/
+.venv/
+venv/
+
+# 测试临时目录
+tests/.tmp/
+
+# 打包产物
 build/
+dist/
 *.spec
 
-# 数据 & 配置
-smart_organizer_data/
-smart_organizer/
+# 本地数据（正常情况下数据在 %LOCALAPPDATA%，这里兜底）
 *.db
-*.json
-file_log.txt
-
-# 下载的依赖包（太大，不适合 git）
-packages/
-
-# 环境
-venv/
-.env
-
-# 系统
-Thumbs.db
-.DS_Store
-
-# 数据库备份文件
-数据库*.json
+*.db-wal
+*.db-shm
+logs/
+reports/
+config.json
